@@ -4,6 +4,27 @@ const bodyParser = require("body-parser");
 const app = express();
 const port = 3001;
 
+const allowedOrigins = [
+  "http://localhost:3000", // For local development
+  "https://nolimitsmedia.github.io", // For your production frontend (GitHub Pages)
+  // Add more domains if you need
+];
+
+// ✅ Configure CORS to allow requests from your frontend origin
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps, Postman)
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+  })
+);
+
 // ✅ Import route files
 const usersRoutes = require("./routes/users");
 const adminsRoutes = require("./routes/admins");
@@ -17,17 +38,6 @@ const familySearch = require("./routes/familySearch");
 const uploadsRoute = require("./routes/uploads");
 const familiesRouter = require("./routes/families");
 const path = require("path");
-
-// ✅ Configure CORS to allow requests from your frontend origin
-app.use(
-  cors({
-    origin: [
-      // "http://localhost:3000", // for local dev
-      "https://nolimitsmedia.github.io", // for your production frontend
-    ],
-    credentials: true, // still safe to keep
-  })
-);
 
 app.use(bodyParser.json());
 

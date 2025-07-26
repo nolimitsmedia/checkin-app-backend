@@ -37,7 +37,7 @@ app.use("/api/reports", reportsRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/elders", elderRoutes);
-app.use("/api/family-search", familySearch);
+app.use("/api/familysearch", familySearch);
 app.use("/api/uploads", uploadsRoute);
 app.use("/api/families", familiesRouter);
 app.use("/api/import", require("./routes/import"));

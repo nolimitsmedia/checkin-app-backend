@@ -22,7 +22,7 @@ const path = require("path");
 app.use(
   cors({
     origin: [
-      "http://localhost:3000", // for local dev
+      // "http://localhost:3000", // for local dev
       "https://nolimitsmedia.github.io", // for your production frontend
     ],
     credentials: true, // still safe to keep

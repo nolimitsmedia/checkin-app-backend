@@ -21,8 +21,11 @@ const path = require("path");
 // ✅ Configure CORS to allow requests from your frontend origin
 app.use(
   cors({
-    origin: "http://localhost:3000", // 👈 match your React app's actual URL
-    credentials: true,
+    origin: [
+      "http://localhost:3000", // for local dev
+      "https://nolimitsmedia.github.io", // for your production frontend
+    ],
+    credentials: true, // still safe to keep
   })
 );
 

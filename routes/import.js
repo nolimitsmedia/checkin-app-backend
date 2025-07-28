@@ -35,6 +35,12 @@ function normalizeGender(val) {
   return null;
 }
 
+// Utility: Normalize phone (treat empty/blank as null)
+function normalizePhone(val) {
+  if (!val || String(val).trim() === "") return null;
+  return String(val).trim();
+}
+
 router.post("/users", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
@@ -84,17 +90,12 @@ router.post("/users", upload.single("file"), async (req, res) => {
       // Prepare gender and status
       const gender = normalizeGender(u.gender);
       const active = normalizeStatus(u.status);
+      const phone = normalizePhone(u.phone);
 
-      // Normalize role: default to "member" unless explicitly "elder"
-      let role = (u.role || "").trim().toLowerCase();
-      if (!role) role = "member";
-      const isElder = role === "elder";
+      const role = (u.role || "").trim().toLowerCase();
 
-      // Always log the row for debug
-      console.log("Importing row:", u);
-
-      // Insert or update based on role
-      if (isElder) {
+      if (role === "elder") {
+        // Insert or update elder by email (or by name if you want to allow missing emails)
         await db.query(
           `INSERT INTO elders (first_name, last_name, email, phone, role, family_id, gender, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -105,7 +106,7 @@ router.post("/users", upload.single("file"), async (req, res) => {
             u.first_name,
             u.last_name,
             u.email || null,
-            u.phone || null,
+            phone,
             "elder",
             familyId,
             gender,
@@ -113,6 +114,7 @@ router.post("/users", upload.single("file"), async (req, res) => {
           ]
         );
       } else {
+        // Insert or update user by email (or by name if you want to allow missing emails)
         await db.query(
           `INSERT INTO users (first_name, last_name, email, phone, role, family_id, gender, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -123,8 +125,8 @@ router.post("/users", upload.single("file"), async (req, res) => {
             u.first_name,
             u.last_name,
             u.email || null,
-            u.phone || null,
-            role,
+            phone,
+            u.role || null,
             familyId,
             gender,
             active,

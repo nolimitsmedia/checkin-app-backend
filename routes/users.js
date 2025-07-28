@@ -182,6 +182,7 @@ router.put("/:id", authenticate, async (req, res) => {
     family_id,
     avatar,
     active,
+    gender,
   } = req.body;
   const targetTable = roleParam === "elder" ? "elders" : "users";
   const relationTable =
@@ -194,7 +195,7 @@ router.put("/:id", authenticate, async (req, res) => {
     // 👇 Now includes active!
     const result = await client.query(
       `UPDATE ${targetTable}
-       SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7
+       SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
        WHERE id = $8 RETURNING *`,
       [
         first_name,
@@ -206,6 +207,7 @@ router.put("/:id", authenticate, async (req, res) => {
         typeof active === "string"
           ? active === "true" // handle both boolean and string
           : !!active,
+        gender || null,
         id,
       ]
     );
@@ -296,7 +298,7 @@ router.post("/", authenticate, async (req, res) => {
     const result = await db.query(
       `INSERT INTO ${
         isElder ? "elders" : "users"
-      } (first_name, last_name, email, phone, role, avatar, family_id)
+      } (first_name, last_name, email, phone, role, avatar, family_id, gender)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
       [
@@ -307,6 +309,7 @@ router.post("/", authenticate, async (req, res) => {
         role.toLowerCase(),
         avatar || null,
         family_id || null,
+        gender || null,
       ]
     );
 

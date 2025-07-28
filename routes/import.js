@@ -47,7 +47,7 @@ router.post("/users", upload.single("file"), async (req, res) => {
       fs.createReadStream(req.file.path)
         .pipe(csv())
         .on("data", (row) => {
-          if (!row.first_name || !row.last_name || !row.email || !row.role) {
+          if (!row.first_name || !row.last_name) {
             hasError = true;
           }
           results.push(row);
@@ -58,8 +58,7 @@ router.post("/users", upload.single("file"), async (req, res) => {
 
     if (hasError) {
       return res.status(400).json({
-        message:
-          "Missing required user fields in CSV (first_name, last_name, email, role)",
+        message: "Missing required user fields in CSV (first_name, last_name)",
       });
     }
 

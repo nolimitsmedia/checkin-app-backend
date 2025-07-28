@@ -45,7 +45,10 @@ router.post("/users", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
   const results = [];
-  let hasError = false;
+  let hasError = false,
+    imported = 0,
+    skipped = 0,
+    errors = [];
 
   try {
     // Parse CSV
@@ -53,9 +56,7 @@ router.post("/users", upload.single("file"), async (req, res) => {
       fs.createReadStream(req.file.path)
         .pipe(csv())
         .on("data", (row) => {
-          if (!row.first_name || !row.last_name) {
-            hasError = true;
-          }
+          if (!row.first_name || !row.last_name) hasError = true;
           results.push(row);
         })
         .on("end", resolve)
@@ -69,16 +70,14 @@ router.post("/users", upload.single("file"), async (req, res) => {
     }
 
     for (const u of results) {
-      // Find or create family if family_name is provided
       let familyId = null;
       if (u.family_name) {
         const fam = await db.query(
           "SELECT id FROM families WHERE family_name=$1",
           [u.family_name]
         );
-        if (fam.rows.length > 0) {
-          familyId = fam.rows[0].id;
-        } else {
+        if (fam.rows.length > 0) familyId = fam.rows[0].id;
+        else {
           const ins = await db.query(
             "INSERT INTO families (family_name) VALUES ($1) RETURNING id",
             [u.family_name]
@@ -87,56 +86,100 @@ router.post("/users", upload.single("file"), async (req, res) => {
         }
       }
 
-      // Prepare gender and status
       const gender = normalizeGender(u.gender);
       const active = normalizeStatus(u.status);
       const phone = normalizePhone(u.phone);
-
       const role = (u.role || "").trim().toLowerCase();
 
-      // INSERT OR UPDATE LOGIC
-      if (role === "elder") {
-        // Insert or update elder by email
-        await db.query(
-          `INSERT INTO elders (first_name, last_name, email, phone, role, family_id, gender, active)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (email) DO UPDATE
-           SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone,
-               family_id=EXCLUDED.family_id, gender=EXCLUDED.gender, active=EXCLUDED.active`,
-          [
-            u.first_name,
-            u.last_name,
-            u.email || null,
-            phone,
-            "elder",
-            familyId,
-            gender,
-            active,
-          ]
-        );
-      } else {
-        // Insert or update user by email
-        await db.query(
-          `INSERT INTO users (first_name, last_name, email, phone, role, family_id, gender, active)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (email) DO UPDATE
-           SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone,
-               role=EXCLUDED.role, family_id=EXCLUDED.family_id, gender=EXCLUDED.gender, active=EXCLUDED.active`,
-          [
-            u.first_name,
-            u.last_name,
-            u.email || null,
-            phone,
-            u.role || null,
-            familyId,
-            gender,
-            active,
-          ]
-        );
+      try {
+        if (role === "elder") {
+          // Upsert by email if present, else insert new always
+          if (u.email) {
+            await db.query(
+              `INSERT INTO elders (first_name, last_name, email, phone, role, family_id, gender, active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (email) DO UPDATE
+               SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone,
+                   family_id=EXCLUDED.family_id, gender=EXCLUDED.gender, active=EXCLUDED.active`,
+              [
+                u.first_name,
+                u.last_name,
+                u.email,
+                phone,
+                "elder",
+                familyId,
+                gender,
+                active,
+              ]
+            );
+          } else {
+            // If no email, just insert new row
+            await db.query(
+              `INSERT INTO elders (first_name, last_name, email, phone, role, family_id, gender, active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [
+                u.first_name,
+                u.last_name,
+                null,
+                phone,
+                "elder",
+                familyId,
+                gender,
+                active,
+              ]
+            );
+          }
+        } else {
+          // Upsert by email if present, else insert new always
+          if (u.email) {
+            await db.query(
+              `INSERT INTO users (first_name, last_name, email, phone, role, family_id, gender, active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (email) DO UPDATE
+               SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone,
+                   role=EXCLUDED.role, family_id=EXCLUDED.family_id, gender=EXCLUDED.gender, active=EXCLUDED.active`,
+              [
+                u.first_name,
+                u.last_name,
+                u.email,
+                phone,
+                u.role || null,
+                familyId,
+                gender,
+                active,
+              ]
+            );
+          } else {
+            // If no email, just insert new row
+            await db.query(
+              `INSERT INTO users (first_name, last_name, email, phone, role, family_id, gender, active)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [
+                u.first_name,
+                u.last_name,
+                null,
+                phone,
+                u.role || null,
+                familyId,
+                gender,
+                active,
+              ]
+            );
+          }
+        }
+        imported++;
+      } catch (err) {
+        skipped++;
+        errors.push({
+          user: `${u.first_name} ${u.last_name}`,
+          phone,
+          error: err.message,
+        });
+        continue;
       }
     }
 
-    res.json({ message: "Import complete" });
+    res.json({ message: "Import complete", imported, skipped, errors });
   } catch (err) {
     console.error("Import error", err);
     res.status(500).json({

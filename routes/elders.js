@@ -70,6 +70,14 @@ router.get("/:id/details", authenticate, async (req, res) => {
   }
 });
 
+// PATCH /api/users/:id/active
+router.patch("/:id/active", async (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body;
+  await db.query("UPDATE users SET active=$1 WHERE id=$2", [active, id]);
+  res.json({ success: true });
+});
+
 // ✅ DELETE /api/elders/:id
 router.delete("/:id", authenticate, async (req, res) => {
   const id = parseInt(req.params.id, 10);

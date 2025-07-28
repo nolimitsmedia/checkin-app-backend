@@ -135,21 +135,23 @@ router.get("/masterlist", authenticate, async (req, res) => {
         u.email,
         u.role,
         u.avatar,
+        u.active,
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.name), NULL) AS ministries,
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.id), NULL) AS ministry_ids
       FROM (
-        SELECT id, first_name, last_name, email, role, avatar FROM users
+        SELECT id, first_name, last_name, email, role, avatar, COALESCE(active, true) as active FROM users
         UNION ALL
-        SELECT id, first_name, last_name, email, role, avatar FROM elders
+        SELECT id, first_name, last_name, email, role, avatar, COALESCE(active, true) as active FROM elders
+
       ) u
       LEFT JOIN user_ministries um ON um.user_id = u.id AND u.role != 'elder'
       LEFT JOIN elder_ministries em ON em.elder_id = u.id AND u.role = 'elder'
       LEFT JOIN ministries m ON (m.id = um.ministry_id OR m.id = em.ministry_id)
-      GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.avatar
+      GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.avatar, u.active
       ORDER BY u.first_name, u.last_name
     `);
 
-    console.log("✅ Masterlist Result Count:", result.rows.length);
+    console.log("DEBUG /masterlist rows:", result.rows);
     res.json(result.rows);
   } catch (err) {
     console.error("❌ Error in masterlist:", err.message);
@@ -296,6 +298,14 @@ router.put("/:id", authenticate, async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// PATCH /api/users/:id/active
+router.patch("/:id/active", async (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body;
+  await db.query("UPDATE users SET active=$1 WHERE id=$2", [active, id]);
+  res.json({ success: true });
 });
 
 // ✅ DELETE /api/users/:id

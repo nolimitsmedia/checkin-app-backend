@@ -85,8 +85,16 @@ router.post("/users", upload.single("file"), async (req, res) => {
       const gender = normalizeGender(u.gender);
       const active = normalizeStatus(u.status);
 
-      if (u.role.trim().toLowerCase() === "elder") {
-        // Insert or update elder by email
+      // Normalize role: default to "member" unless explicitly "elder"
+      let role = (u.role || "").trim().toLowerCase();
+      if (!role) role = "member";
+      const isElder = role === "elder";
+
+      // Always log the row for debug
+      console.log("Importing row:", u);
+
+      // Insert or update based on role
+      if (isElder) {
         await db.query(
           `INSERT INTO elders (first_name, last_name, email, phone, role, family_id, gender, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -96,16 +104,15 @@ router.post("/users", upload.single("file"), async (req, res) => {
           [
             u.first_name,
             u.last_name,
-            u.email,
-            u.phone,
-            u.role,
+            u.email || null,
+            u.phone || null,
+            "elder",
             familyId,
             gender,
             active,
           ]
         );
       } else {
-        // Insert or update user by email
         await db.query(
           `INSERT INTO users (first_name, last_name, email, phone, role, family_id, gender, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -115,9 +122,9 @@ router.post("/users", upload.single("file"), async (req, res) => {
           [
             u.first_name,
             u.last_name,
-            u.email,
-            u.phone,
-            u.role,
+            u.email || null,
+            u.phone || null,
+            role,
             familyId,
             gender,
             active,

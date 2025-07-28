@@ -8,6 +8,33 @@ const db = require("../db");
 
 const upload = multer({ dest: "uploads/" });
 
+// Utility to normalize status string to boolean
+function normalizeStatus(val) {
+  if (!val) return true; // Default to active
+  if (typeof val === "boolean") return val;
+  const lower = String(val).toLowerCase();
+  return !["inactive", "false", "0", "no"].includes(lower);
+}
+
+// Utility to normalize gender to match your backend values
+function normalizeGender(val) {
+  if (!val) return null;
+  const lower = String(val).toLowerCase();
+  if (["male", "m"].includes(lower)) return "male";
+  if (["female", "f"].includes(lower)) return "female";
+  if (["other", "o"].includes(lower)) return "other";
+  if (
+    [
+      "prefer not to say",
+      "prefer_not_to_say",
+      "prefer-not-to-say",
+      "n/a",
+    ].includes(lower)
+  )
+    return "prefer_not_to_say";
+  return null;
+}
+
 router.post("/users", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: "No file uploaded" });
 
@@ -55,24 +82,47 @@ router.post("/users", upload.single("file"), async (req, res) => {
         }
       }
 
-      // Choose table based on role
+      // Prepare gender and status
+      const gender = normalizeGender(u.gender);
+      const active = normalizeStatus(u.status);
+
       if (u.role.trim().toLowerCase() === "elder") {
         // Insert or update elder by email
         await db.query(
-          `INSERT INTO elders (first_name, last_name, email, phone, role, family_id)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO elders (first_name, last_name, email, phone, role, family_id, gender, active)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (email) DO UPDATE
-           SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone, family_id=EXCLUDED.family_id`,
-          [u.first_name, u.last_name, u.email, u.phone, u.role, familyId]
+           SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone,
+               family_id=EXCLUDED.family_id, gender=EXCLUDED.gender, active=EXCLUDED.active`,
+          [
+            u.first_name,
+            u.last_name,
+            u.email,
+            u.phone,
+            u.role,
+            familyId,
+            gender,
+            active,
+          ]
         );
       } else {
         // Insert or update user by email
         await db.query(
-          `INSERT INTO users (first_name, last_name, email, phone, role, family_id)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO users (first_name, last_name, email, phone, role, family_id, gender, active)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (email) DO UPDATE
-           SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone, role=EXCLUDED.role, family_id=EXCLUDED.family_id`,
-          [u.first_name, u.last_name, u.email, u.phone, u.role, familyId]
+           SET first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name, phone=EXCLUDED.phone,
+               role=EXCLUDED.role, family_id=EXCLUDED.family_id, gender=EXCLUDED.gender, active=EXCLUDED.active`,
+          [
+            u.first_name,
+            u.last_name,
+            u.email,
+            u.phone,
+            u.role,
+            familyId,
+            gender,
+            active,
+          ]
         );
       }
     }

@@ -142,7 +142,6 @@ router.get("/masterlist", authenticate, async (req, res) => {
         SELECT id, first_name, last_name, email, role, avatar, COALESCE(active, true) as active FROM users
         UNION ALL
         SELECT id, first_name, last_name, email, role, avatar, COALESCE(active, true) as active FROM elders
-
       ) u
       LEFT JOIN user_ministries um ON um.user_id = u.id AND u.role != 'elder'
       LEFT JOIN elder_ministries em ON em.elder_id = u.id AND u.role = 'elder'
@@ -151,7 +150,6 @@ router.get("/masterlist", authenticate, async (req, res) => {
       ORDER BY u.first_name, u.last_name
     `);
 
-    // console.log("DEBUG /masterlist rows:", result.rows);
     res.json(result.rows);
   } catch (err) {
     console.error("❌ Error in masterlist:", err.message);
@@ -159,69 +157,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
   }
 });
 
-// // ✅ PUT /api/users/:id — FIXED to update family_id as well!
-// router.put("/:id", authenticate, async (req, res) => {
-//   const allowedRoles = ["admin", "super_admin"];
-//   if (!allowedRoles.includes(req.user.role)) {
-//     return res.status(403).json({ message: "Unauthorized" });
-//   }
-
-//   const rawId = req.params.id;
-//   const roleParam =
-//     req.query.role || (rawId.startsWith("elder-") ? "elder" : "user");
-//   const id = parseInt(rawId.replace(/^[^\d]+/, ""), 10);
-//   if (isNaN(id)) {
-//     return res.status(400).json({ message: "Invalid ID format" });
-//   }
-
-//   const { first_name, last_name, email, role, ministry_ids, family_id } =
-//     req.body;
-//   const targetTable = roleParam === "elder" ? "elders" : "users";
-//   const relationTable =
-//     roleParam === "elder" ? "elder_ministries" : "user_ministries";
-
-//   const client = await db.connect();
-//   try {
-//     await client.query("BEGIN");
-
-//     // 👇 FIXED: Now updates family_id
-//     const result = await client.query(
-//       `UPDATE ${targetTable}
-//        SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5
-//        WHERE id = $6 RETURNING *`,
-//       [first_name, last_name, email, role, family_id || null, id]
-//     );
-
-//     if (result.rowCount === 0) {
-//       await client.query("ROLLBACK");
-//       return res.status(404).json({ message: "User not found" });
-//     }
-
-//     // Update ministries as before
-//     await client.query(
-//       `DELETE FROM ${relationTable} WHERE ${roleParam}_id = $1`,
-//       [id]
-//     );
-//     if (Array.isArray(ministry_ids) && ministry_ids.length > 0) {
-//       for (const ministryId of ministry_ids) {
-//         await client.query(
-//           `INSERT INTO ${relationTable} (${roleParam}_id, ministry_id) VALUES ($1, $2)`,
-//           [id, ministryId]
-//         );
-//       }
-//     }
-
-//     await client.query("COMMIT");
-//     res.json(result.rows[0]);
-//   } catch (err) {
-//     await client.query("ROLLBACK");
-//     console.error("Update user error:", err);
-//     res.status(500).json({ message: "Failed to update user" });
-//   } finally {
-//     client.release();
-//   }
-// });
-// ✅ PUT /api/users/:id — FIXED to update family_id AND avatar!
+// ✅ PUT /api/users/:id — updates family_id, avatar, AND active!
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {
@@ -236,7 +172,7 @@ router.put("/:id", authenticate, async (req, res) => {
     return res.status(400).json({ message: "Invalid ID format" });
   }
 
-  // 👇 INCLUDE AVATAR HERE
+  // 👇 INCLUDE AVATAR AND ACTIVE HERE
   const {
     first_name,
     last_name,
@@ -245,6 +181,7 @@ router.put("/:id", authenticate, async (req, res) => {
     ministry_ids,
     family_id,
     avatar,
+    active,
   } = req.body;
   const targetTable = roleParam === "elder" ? "elders" : "users";
   const relationTable =
@@ -254,11 +191,11 @@ router.put("/:id", authenticate, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // 👇 AVATAR now included!
+    // 👇 Now includes active!
     const result = await client.query(
       `UPDATE ${targetTable}
-       SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6
-       WHERE id = $7 RETURNING *`,
+       SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7
+       WHERE id = $8 RETURNING *`,
       [
         first_name,
         last_name,
@@ -266,6 +203,9 @@ router.put("/:id", authenticate, async (req, res) => {
         role,
         family_id || null,
         avatar || null,
+        typeof active === "string"
+          ? active === "true" // handle both boolean and string
+          : !!active,
         id,
       ]
     );

@@ -151,7 +151,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
       ORDER BY u.first_name, u.last_name
     `);
 
-    console.log("DEBUG /masterlist rows:", result.rows);
+    // console.log("DEBUG /masterlist rows:", result.rows);
     res.json(result.rows);
   } catch (err) {
     console.error("❌ Error in masterlist:", err.message);

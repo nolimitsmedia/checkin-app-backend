@@ -158,7 +158,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
   }
 });
 
-// ✅ PUT /api/users/:id — updates family_id, avatar, gender, and active!
+// ✅ PUT /api/users/:id — updates family_id, avatar, active, gender!
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {
@@ -173,7 +173,7 @@ router.put("/:id", authenticate, async (req, res) => {
     return res.status(400).json({ message: "Invalid ID format" });
   }
 
-  // 👇 INCLUDE AVATAR, ACTIVE, and GENDER HERE
+  // 👇 INCLUDE AVATAR, ACTIVE, GENDER HERE
   const {
     first_name,
     last_name,
@@ -193,7 +193,7 @@ router.put("/:id", authenticate, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Fix param order for gender and id (id must be $9)
+    // --- KEY FIX HERE: WHERE id = $9 ---
     const result = await client.query(
       `UPDATE ${targetTable}
        SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
@@ -205,9 +205,7 @@ router.put("/:id", authenticate, async (req, res) => {
         role,
         family_id || null,
         avatar || null,
-        typeof active === "string"
-          ? active === "true" // handle both boolean and string
-          : !!active,
+        typeof active === "string" ? active === "true" : !!active,
         gender || null,
         id,
       ]

@@ -94,8 +94,9 @@ router.post("/users", upload.single("file"), async (req, res) => {
 
       const role = (u.role || "").trim().toLowerCase();
 
+      // INSERT OR UPDATE LOGIC
       if (role === "elder") {
-        // Insert or update elder by email (or by name if you want to allow missing emails)
+        // Insert or update elder by email
         await db.query(
           `INSERT INTO elders (first_name, last_name, email, phone, role, family_id, gender, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -114,7 +115,7 @@ router.post("/users", upload.single("file"), async (req, res) => {
           ]
         );
       } else {
-        // Insert or update user by email (or by name if you want to allow missing emails)
+        // Insert or update user by email
         await db.query(
           `INSERT INTO users (first_name, last_name, email, phone, role, family_id, gender, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -138,7 +139,11 @@ router.post("/users", upload.single("file"), async (req, res) => {
     res.json({ message: "Import complete" });
   } catch (err) {
     console.error("Import error", err);
-    res.status(500).json({ message: "Import error", error: err.message });
+    res.status(500).json({
+      message: "Import error",
+      error: err.message,
+      detail: err.detail,
+    });
   } finally {
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);

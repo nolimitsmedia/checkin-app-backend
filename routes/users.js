@@ -158,7 +158,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
   }
 });
 
-// ✅ PUT /api/users/:id — updates family_id, avatar, AND active!
+// ✅ PUT /api/users/:id — updates family_id, avatar, gender, and active!
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {
@@ -173,7 +173,7 @@ router.put("/:id", authenticate, async (req, res) => {
     return res.status(400).json({ message: "Invalid ID format" });
   }
 
-  // 👇 INCLUDE AVATAR AND ACTIVE HERE
+  // 👇 INCLUDE AVATAR, ACTIVE, and GENDER HERE
   const {
     first_name,
     last_name,
@@ -193,11 +193,11 @@ router.put("/:id", authenticate, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // 👇 Now includes active!
+    // Fix param order for gender and id (id must be $9)
     const result = await client.query(
       `UPDATE ${targetTable}
        SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
-       WHERE id = $8 RETURNING *`,
+       WHERE id = $9 RETURNING *`,
       [
         first_name,
         last_name,
@@ -291,8 +291,16 @@ router.delete("/:id", authenticate, async (req, res) => {
 
 // ✅ POST /api/users — create a new user or elder
 router.post("/", authenticate, async (req, res) => {
-  const { first_name, last_name, email, phone, role, avatar, family_id } =
-    req.body;
+  const {
+    first_name,
+    last_name,
+    email,
+    phone,
+    role,
+    avatar,
+    family_id,
+    gender,
+  } = req.body;
   const isElder = role?.toLowerCase() === "elder";
 
   try {
@@ -300,7 +308,7 @@ router.post("/", authenticate, async (req, res) => {
       `INSERT INTO ${
         isElder ? "elders" : "users"
       } (first_name, last_name, email, phone, role, avatar, family_id, gender)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
       [
         first_name,

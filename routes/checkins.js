@@ -168,4 +168,21 @@ router.get("/all", authenticate, async (req, res) => {
   }
 });
 
+// server-api/routes/checkins.js
+
+router.post("/bulk-checkout", async (req, res) => {
+  const { ids } = req.body; // expects: { ids: [1,2,3] }
+  if (!Array.isArray(ids)) {
+    return res.status(400).json({ message: "Invalid ids array." });
+  }
+  try {
+    await db.query(`DELETE FROM check_ins WHERE id = ANY($1::int[])`, [ids]);
+    res.json({ success: true, message: "Bulk check-out complete." });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ message: "Bulk check-out failed.", error: err.message });
+  }
+});
+
 module.exports = router;

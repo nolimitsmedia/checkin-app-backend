@@ -20,7 +20,7 @@ router.get("/all", authenticate, async (req, res) => {
   }
 });
 
-// ✅ GET /api/users/elders
+// GET /api/users/elders
 router.get("/elders", authenticate, async (req, res) => {
   try {
     const result = await db.query(
@@ -33,7 +33,7 @@ router.get("/elders", authenticate, async (req, res) => {
   }
 });
 
-// ✅ GET /api/users?search=Jane (now with family_name!)
+// GET /api/users?search=Jane (now with family_name!)
 router.get("/", authenticate, async (req, res) => {
   const searchRaw = req.query.search;
   const search = searchRaw ? searchRaw.toLowerCase() : null;
@@ -74,7 +74,7 @@ router.get("/", authenticate, async (req, res) => {
   }
 });
 
-// ✅ GET /api/users/:id/details
+// GET /api/users/:id/details
 router.get("/:id/details", authenticate, async (req, res) => {
   const rawId = req.params.id;
   const isElder = rawId.startsWith("elder-");
@@ -124,7 +124,7 @@ router.get("/:id/details", authenticate, async (req, res) => {
   }
 });
 
-// ✅ GET /api/users/masterlist
+// GET /api/users/masterlist
 router.get("/masterlist", authenticate, async (req, res) => {
   try {
     const result = await db.query(`
@@ -158,7 +158,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
   }
 });
 
-// ✅ PUT /api/users/:id — updates family_id, avatar, active, gender!
+// PUT /api/users/:id — updates all info, ministries, avatar, gender, active, etc.
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {
@@ -173,7 +173,6 @@ router.put("/:id", authenticate, async (req, res) => {
     return res.status(400).json({ message: "Invalid ID format" });
   }
 
-  // 👇 INCLUDE AVATAR, ACTIVE, GENDER HERE
   const {
     first_name,
     last_name,
@@ -193,7 +192,7 @@ router.put("/:id", authenticate, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // --- KEY FIX HERE: WHERE id = $9 ---
+    // Update user or elder info
     const result = await client.query(
       `UPDATE ${targetTable}
        SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
@@ -216,13 +215,19 @@ router.put("/:id", authenticate, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Update ministries as before
+    // Delete old ministries and add new ones
     await client.query(
       `DELETE FROM ${relationTable} WHERE ${roleParam}_id = $1`,
       [id]
     );
     if (Array.isArray(ministry_ids) && ministry_ids.length > 0) {
-      for (const ministryId of ministry_ids) {
+      // Only insert valid ministries that exist in ministries table
+      const { rows: validMinistries } = await client.query(
+        `SELECT id FROM ministries WHERE id = ANY($1)`,
+        [ministry_ids]
+      );
+      const validIds = validMinistries.map((m) => m.id);
+      for (const ministryId of validIds) {
         await client.query(
           `INSERT INTO ${relationTable} (${roleParam}_id, ministry_id) VALUES ($1, $2)`,
           [id, ministryId]
@@ -249,7 +254,7 @@ router.patch("/:id/active", async (req, res) => {
   res.json({ success: true });
 });
 
-// ✅ DELETE /api/users/:id
+// DELETE /api/users/:id
 router.delete("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {
@@ -287,7 +292,7 @@ router.delete("/:id", authenticate, async (req, res) => {
   }
 });
 
-// ✅ POST /api/users — create a new user or elder
+// POST /api/users — create a new user or elder
 router.post("/", authenticate, async (req, res) => {
   const {
     first_name,

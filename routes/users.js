@@ -173,17 +173,21 @@ router.put("/:id", authenticate, async (req, res) => {
     return res.status(400).json({ message: "Invalid ID format" });
   }
 
+  // Always treat ministry_ids as an array
   const {
     first_name,
     last_name,
     email,
     role,
-    ministry_ids,
     family_id,
     avatar,
     active,
     gender,
   } = req.body;
+  const ministry_ids = Array.isArray(req.body.ministry_ids)
+    ? req.body.ministry_ids
+    : [];
+
   const targetTable = roleParam === "elder" ? "elders" : "users";
   const relationTable =
     roleParam === "elder" ? "elder_ministries" : "user_ministries";
@@ -215,12 +219,12 @@ router.put("/:id", authenticate, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Delete old ministries and add new ones
+    // Delete old ministries and add new ones (or none)
     await client.query(
       `DELETE FROM ${relationTable} WHERE ${roleParam}_id = $1`,
       [id]
     );
-    if (Array.isArray(ministry_ids) && ministry_ids.length > 0) {
+    if (ministry_ids.length > 0) {
       // Only insert valid ministries that exist in ministries table
       const { rows: validMinistries } = await client.query(
         `SELECT id FROM ministries WHERE id = ANY($1)`,

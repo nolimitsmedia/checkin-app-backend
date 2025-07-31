@@ -10,7 +10,7 @@ router.get("/attendees", async (req, res) => {
         u.id AS id,
         u.first_name, 
         u.last_name, 
-         u.email,
+        u.email,
         u.phone, 
         e.title AS event_title, 
         e.event_date,
@@ -43,7 +43,44 @@ router.get("/attendees", async (req, res) => {
   }
 });
 
-// ✅ B. Ministry Absent Report (for an event: users in each ministry who did NOT check in)
+// ✅ NEW: Ministry Attendance Report (for any ministry, like Overseers/Staff)
+router.get("/ministry-attendance/:ministry_id", async (req, res) => {
+  const ministry_id = parseInt(req.params.ministry_id, 10);
+  const event_id = req.query.event_id ? parseInt(req.query.event_id, 10) : null;
+
+  let query = `
+    SELECT 
+      ci.id AS checkin_id,
+      u.id AS user_id,
+      u.first_name,
+      u.last_name,
+      u.email,
+      u.role,
+      e.title AS event_title,
+      e.event_date,
+      ci.checkin_time
+    FROM check_ins ci
+    JOIN users u ON ci.user_id = u.id
+    JOIN user_ministries um ON um.user_id = u.id
+    JOIN events e ON ci.event_id = e.id
+    WHERE um.ministry_id = $1
+  `;
+  let params = [ministry_id];
+  if (event_id) {
+    query += " AND ci.event_id = $2";
+    params.push(event_id);
+  }
+
+  try {
+    const result = await db.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Error fetching ministry attendance:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ✅ B. Ministry Absent Report (users in each ministry who did NOT check in for the event)
 router.get("/ministry-absent/:event_id", async (req, res) => {
   const { event_id } = req.params;
   try {
@@ -55,7 +92,6 @@ router.get("/ministry-absent/:event_id", async (req, res) => {
         u.last_name,
         u.email,
         u.phone
-        
       FROM ministries m
       JOIN user_ministries um ON m.id = um.ministry_id
       JOIN users u ON um.user_id = u.id

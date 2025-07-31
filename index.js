@@ -37,6 +37,7 @@ const elderRoutes = require("./routes/elders");
 const familySearch = require("./routes/familySearch");
 const uploadsRoute = require("./routes/uploads");
 const familiesRouter = require("./routes/families");
+const ministriesRouter = require("./routes/ministries");
 const path = require("path");
 
 app.use(bodyParser.json());
@@ -53,6 +54,7 @@ app.use("/api/elders", elderRoutes);
 app.use("/api/familySearch", familySearch);
 app.use("/api/uploads", uploadsRoute);
 app.use("/api/families", familiesRouter);
+app.use("/api/ministries", ministriesRouter);
 app.use("/api/import", require("./routes/import"));
 
 // Serve static files from /uploads

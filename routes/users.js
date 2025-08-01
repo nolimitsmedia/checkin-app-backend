@@ -144,8 +144,8 @@ router.get("/masterlist", authenticate, async (req, res) => {
         UNION ALL
         SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM elders
       ) u
-      LEFT JOIN user_ministries um ON um.user_id = u.id AND u.role != 'elder'
-      LEFT JOIN elder_ministries em ON em.elder_id = u.id AND u.role = 'elder'
+      LEFT JOIN user_ministries um ON um.user_id = u.id
+      LEFT JOIN elder_ministries em ON em.elder_id = u.id
       LEFT JOIN ministries m ON (m.id = um.ministry_id OR m.id = em.ministry_id)
       GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.avatar, u.active, u.gender
       ORDER BY u.first_name, u.last_name
@@ -199,6 +199,9 @@ router.put("/:id", authenticate, async (req, res) => {
       const relationTable =
         newRole === "elder" ? "elder_ministries" : "user_ministries";
 
+      // Fix: use correct foreign key column name
+      const roleIdColumn = newRole === "elder" ? "elder_id" : "user_id";
+
       const result = await client.query(
         `UPDATE ${targetTable}
          SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
@@ -223,7 +226,7 @@ router.put("/:id", authenticate, async (req, res) => {
 
       // Delete old ministries and insert new ministries
       await client.query(
-        `DELETE FROM ${relationTable} WHERE ${newRole}_id = $1`,
+        `DELETE FROM ${relationTable} WHERE ${roleIdColumn} = $1`,
         [id]
       );
       if (ministry_ids.length > 0) {
@@ -234,7 +237,7 @@ router.put("/:id", authenticate, async (req, res) => {
         const validIds = validMinistries.map((m) => m.id);
         for (const ministryId of validIds) {
           await client.query(
-            `INSERT INTO ${relationTable} (${newRole}_id, ministry_id) VALUES ($1, $2)`,
+            `INSERT INTO ${relationTable} (${roleIdColumn}, ministry_id) VALUES ($1, $2)`,
             [id, ministryId]
           );
         }
@@ -252,6 +255,9 @@ router.put("/:id", authenticate, async (req, res) => {
       const newTable = newRole === "elder" ? "elders" : "users";
       const newRelationTable =
         newRole === "elder" ? "elder_ministries" : "user_ministries";
+
+      const oldRoleIdColumn = oldRole === "elder" ? "elder_id" : "user_id";
+      const newRoleIdColumn = newRole === "elder" ? "elder_id" : "user_id";
 
       const { rows: oldUserRows } = await client.query(
         `SELECT * FROM ${oldTable} WHERE id = $1`,
@@ -284,7 +290,7 @@ router.put("/:id", authenticate, async (req, res) => {
 
       // 3. Move ministries: delete from oldRelationTable, insert into newRelationTable
       await client.query(
-        `DELETE FROM ${oldRelationTable} WHERE ${oldRole}_id = $1`,
+        `DELETE FROM ${oldRelationTable} WHERE ${oldRoleIdColumn} = $1`,
         [id]
       );
       if (ministry_ids.length > 0) {
@@ -295,7 +301,7 @@ router.put("/:id", authenticate, async (req, res) => {
         const validIds = validMinistries.map((m) => m.id);
         for (const ministryId of validIds) {
           await client.query(
-            `INSERT INTO ${newRelationTable} (${newRole}_id, ministry_id) VALUES ($1, $2)`,
+            `INSERT INTO ${newRelationTable} (${newRoleIdColumn}, ministry_id) VALUES ($1, $2)`,
             [newUser.id, ministryId]
           );
         }

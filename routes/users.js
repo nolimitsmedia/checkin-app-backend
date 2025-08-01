@@ -33,7 +33,7 @@ router.get("/elders", authenticate, async (req, res) => {
   }
 });
 
-// GET /api/users?search=Jane (now with family_name!)
+// GET /api/users?search=Jane (with family_name)
 router.get("/", authenticate, async (req, res) => {
   const searchRaw = req.query.search;
   const search = searchRaw ? searchRaw.toLowerCase() : null;
@@ -140,12 +140,12 @@ router.get("/masterlist", authenticate, async (req, res) => {
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.name), NULL) AS ministries,
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.id), NULL) AS ministry_ids
       FROM (
-        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM users WHERE role != 'elder'
+        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM users
         UNION ALL
-        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM elders WHERE role = 'elder'
+        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM elders
       ) u
-      LEFT JOIN user_ministries um ON um.user_id = u.id
-      LEFT JOIN elder_ministries em ON em.elder_id = u.id
+      LEFT JOIN user_ministries um ON um.user_id = u.id AND u.role != 'elder'
+      LEFT JOIN elder_ministries em ON em.elder_id = u.id AND u.role = 'elder'
       LEFT JOIN ministries m ON (m.id = um.ministry_id OR m.id = em.ministry_id)
       GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.avatar, u.active, u.gender
       ORDER BY u.first_name, u.last_name
@@ -159,7 +159,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
 });
 
 // PUT /api/users/:id — updates all info, ministries, avatar, gender, active, etc.
-// If role changed from user to elder or vice versa, it moves data accordingly
+// Handles role changes between users and elders by moving data accordingly
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {

@@ -140,12 +140,12 @@ router.get("/masterlist", authenticate, async (req, res) => {
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.name), NULL) AS ministries,
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.id), NULL) AS ministry_ids
       FROM (
-        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM users
+        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM users WHERE role != 'elder'
         UNION ALL
-        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM elders
+        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM elders WHERE role = 'elder'
       ) u
-      LEFT JOIN user_ministries um ON um.user_id = u.id AND u.role != 'elder'
-      LEFT JOIN elder_ministries em ON em.elder_id = u.id AND u.role = 'elder'
+      LEFT JOIN user_ministries um ON um.user_id = u.id
+      LEFT JOIN elder_ministries em ON em.elder_id = u.id
       LEFT JOIN ministries m ON (m.id = um.ministry_id OR m.id = em.ministry_id)
       GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.avatar, u.active, u.gender
       ORDER BY u.first_name, u.last_name

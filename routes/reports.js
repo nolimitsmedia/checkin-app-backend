@@ -111,29 +111,39 @@ router.get("/ministry-absent/:event_id", async (req, res) => {
 });
 
 // ✅ C. Elder Report (all users checked in for ministries managed by selected elder)
+// Added optional event filter (via query param ?event_id=)
 router.get("/elder/:elder_id", async (req, res) => {
   const { elder_id } = req.params;
+  const event_id = req.query.event_id ? parseInt(req.query.event_id, 10) : null;
+
+  let query = `
+    SELECT 
+      u.first_name,
+      u.last_name,
+      u.email,
+      e.title AS event_title,
+      e.event_date,
+      m.name AS ministry_name
+    FROM check_ins ci
+    JOIN users u ON ci.user_id = u.id
+    JOIN user_ministries um ON um.user_id = u.id
+    JOIN ministries m ON m.id = um.ministry_id
+    JOIN elder_ministries em ON em.ministry_id = m.id
+    JOIN events e ON e.id = ci.event_id
+    WHERE em.elder_id = $1
+  `;
+
+  const params = [elder_id];
+
+  if (event_id) {
+    query += " AND ci.event_id = $2";
+    params.push(event_id);
+  }
+
+  query += " ORDER BY e.event_date DESC, u.last_name";
+
   try {
-    const result = await db.query(
-      `
-      SELECT 
-        u.first_name,
-        u.last_name,
-        u.email,
-        e.title AS event_title,
-        e.event_date,
-        m.name AS ministry_name
-      FROM check_ins ci
-      JOIN users u ON ci.user_id = u.id
-      JOIN user_ministries um ON um.user_id = u.id
-      JOIN ministries m ON m.id = um.ministry_id
-      JOIN elder_ministries em ON em.ministry_id = m.id
-      JOIN events e ON e.id = ci.event_id
-      WHERE em.elder_id = $1
-      ORDER BY e.event_date DESC, u.last_name
-    `,
-      [elder_id]
-    );
+    const result = await db.query(query, params);
     res.json(result.rows);
   } catch (err) {
     console.error("Error fetching elder report:", err);

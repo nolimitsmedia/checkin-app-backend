@@ -26,9 +26,9 @@ router.post("/", authenticate, async (req, res) => {
     // 🔐 Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // 🧠 Insert into admins table with role = 'admin'
+    // 🧠 Insert into admins table with role = 'admin' and correct password column
     const result = await db.query(
-      `INSERT INTO admins (first_name, last_name, email, phone, username, password_hash, role)
+      `INSERT INTO admins (first_name, last_name, email, phone, username, password, role)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, first_name, last_name, email, phone, username, role`,
       [first_name, last_name, email, phone, username, hashedPassword, "admin"]

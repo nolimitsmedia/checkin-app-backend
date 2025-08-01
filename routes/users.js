@@ -144,8 +144,8 @@ router.get("/masterlist", authenticate, async (req, res) => {
         UNION ALL
         SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM elders
       ) u
-      LEFT JOIN user_ministries um ON um.user_id = u.id
-      LEFT JOIN elder_ministries em ON em.elder_id = u.id
+      LEFT JOIN user_ministries um ON um.user_id = u.id AND u.role != 'elder'
+      LEFT JOIN elder_ministries em ON em.elder_id = u.id AND u.role = 'elder'
       LEFT JOIN ministries m ON (m.id = um.ministry_id OR m.id = em.ministry_id)
       GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.avatar, u.active, u.gender
       ORDER BY u.first_name, u.last_name
@@ -193,71 +193,25 @@ router.put("/:id", authenticate, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    if (oldRole === newRole) {
-      // Role unchanged: update in same table and ministries normally
-      const targetTable = newRole === "elder" ? "elders" : "users";
-      const relationTable =
-        newRole === "elder" ? "elder_ministries" : "user_ministries";
+    // Determine if role changed between elder and non-elder
+    const oldIsElder = oldRole === "elder";
+    const newIsElder = newRole === "elder";
 
-      // Fix: use correct foreign key column name
-      const roleIdColumn = newRole === "elder" ? "elder_id" : "user_id";
-
-      const result = await client.query(
-        `UPDATE ${targetTable}
-         SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
-         WHERE id = $9 RETURNING *`,
-        [
-          first_name,
-          last_name,
-          email,
-          role,
-          family_id || null,
-          avatar || null,
-          !!active,
-          gender || null,
-          id,
-        ]
-      );
-
-      if (result.rowCount === 0) {
-        await client.query("ROLLBACK");
-        return res.status(404).json({ message: "User not found" });
-      }
-
-      // Delete old ministries and insert new ministries
-      await client.query(
-        `DELETE FROM ${relationTable} WHERE ${roleIdColumn} = $1`,
-        [id]
-      );
-      if (ministry_ids.length > 0) {
-        const { rows: validMinistries } = await client.query(
-          `SELECT id FROM ministries WHERE id = ANY($1)`,
-          [ministry_ids]
-        );
-        const validIds = validMinistries.map((m) => m.id);
-        for (const ministryId of validIds) {
-          await client.query(
-            `INSERT INTO ${relationTable} (${roleIdColumn}, ministry_id) VALUES ($1, $2)`,
-            [id, ministryId]
-          );
-        }
-      }
-
-      await client.query("COMMIT");
-      return res.json(result.rows[0]);
-    } else {
-      // Role changed: move from old table to new table
+    if (oldIsElder !== newIsElder) {
+      // Role changed between elders/users → move data
 
       // 1. Fetch existing user data from old table
-      const oldTable = oldRole === "elder" ? "elders" : "users";
-      const oldRelationTable =
-        oldRole === "elder" ? "elder_ministries" : "user_ministries";
-      const newTable = newRole === "elder" ? "elders" : "users";
-      const newRelationTable =
-        newRole === "elder" ? "elder_ministries" : "user_ministries";
+      const oldTable = oldIsElder ? "elders" : "users";
+      const oldRelationTable = oldIsElder
+        ? "elder_ministries"
+        : "user_ministries";
+      const newTable = newIsElder ? "elders" : "users";
+      const newRelationTable = newIsElder
+        ? "elder_ministries"
+        : "user_ministries";
 
-      const oldRoleIdColumn = oldRole === "elder" ? "elder_id" : "user_id";
-      const newRoleIdColumn = newRole === "elder" ? "elder_id" : "user_id";
+      const oldRoleIdColumn = oldIsElder ? "elder_id" : "user_id";
+      const newRoleIdColumn = newIsElder ? "elder_id" : "user_id";
 
       const { rows: oldUserRows } = await client.query(
         `SELECT * FROM ${oldTable} WHERE id = $1`,
@@ -312,6 +266,55 @@ router.put("/:id", authenticate, async (req, res) => {
 
       await client.query("COMMIT");
       return res.json(newUser);
+    } else {
+      // Role changed within same table or unchanged role - just update normally
+      const targetTable = newIsElder ? "elders" : "users";
+      const relationTable = newIsElder ? "elder_ministries" : "user_ministries";
+      const roleIdColumn = newIsElder ? "elder_id" : "user_id";
+
+      const result = await client.query(
+        `UPDATE ${targetTable}
+         SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
+         WHERE id = $9 RETURNING *`,
+        [
+          first_name,
+          last_name,
+          email,
+          role,
+          family_id || null,
+          avatar || null,
+          !!active,
+          gender || null,
+          id,
+        ]
+      );
+
+      if (result.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      await client.query(
+        `DELETE FROM ${relationTable} WHERE ${roleIdColumn} = $1`,
+        [id]
+      );
+
+      if (ministry_ids.length > 0) {
+        const { rows: validMinistries } = await client.query(
+          `SELECT id FROM ministries WHERE id = ANY($1)`,
+          [ministry_ids]
+        );
+        const validIds = validMinistries.map((m) => m.id);
+        for (const ministryId of validIds) {
+          await client.query(
+            `INSERT INTO ${relationTable} (${roleIdColumn}, ministry_id) VALUES ($1, $2)`,
+            [id, ministryId]
+          );
+        }
+      }
+
+      await client.query("COMMIT");
+      return res.json(result.rows[0]);
     }
   } catch (err) {
     await client.query("ROLLBACK");

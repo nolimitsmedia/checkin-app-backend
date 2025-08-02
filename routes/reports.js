@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 
-// ✅ A. Full Attendee Report (users + elders)
+// A. Full Attendee Report (users + elders)
 router.get("/attendees", async (req, res) => {
   try {
     const result = await db.query(`
@@ -43,7 +43,7 @@ router.get("/attendees", async (req, res) => {
   }
 });
 
-// ✅ Ministries List for Dropdown
+// Ministries List for Dropdown
 router.get("/ministries", async (req, res) => {
   try {
     const result = await db.query(`
@@ -59,7 +59,7 @@ router.get("/ministries", async (req, res) => {
   }
 });
 
-// ✅ NEW: Ministry Attendance Report (for any ministry, like Overseers/Staff)
+// Ministry Attendance Report (for any ministry, like Overseers/Staff)
 router.get("/ministry-attendance/:ministry_id", async (req, res) => {
   const ministry_id = parseInt(req.params.ministry_id, 10);
   const event_id = req.query.event_id ? parseInt(req.query.event_id, 10) : null;
@@ -96,7 +96,7 @@ router.get("/ministry-attendance/:ministry_id", async (req, res) => {
   }
 });
 
-// ✅ B. Ministry Absent Report (users in each ministry who did NOT check in for the event)
+// Ministry Absent Report (users in each ministry who did NOT check in for the event)
 router.get("/ministry-absent/:event_id/:ministry_id?", async (req, res) => {
   const { event_id, ministry_id } = req.params;
 
@@ -133,7 +133,7 @@ router.get("/ministry-absent/:event_id/:ministry_id?", async (req, res) => {
   }
 });
 
-// ✅ C. Elder Report (all users checked in for ministries managed by selected elder)
+// Elder Report (all users checked in for ministries managed by selected elder)
 // Added optional event filter (via query param ?event_id=)
 router.get("/elder/:elder_id", async (req, res) => {
   const { elder_id } = req.params;
@@ -174,7 +174,7 @@ router.get("/elder/:elder_id", async (req, res) => {
   }
 });
 
-// ✅ D. Elder Absent Report (users under the elder's ministries NOT checked in for the event)
+// Elder Absent Report (users under the elder's ministries NOT checked in for the event)
 router.get("/elder-absent/:elder_id/:event_id", async (req, res) => {
   const { elder_id, event_id } = req.params;
   try {

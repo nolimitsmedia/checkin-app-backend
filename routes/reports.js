@@ -97,8 +97,12 @@ router.get("/ministry-attendance/:ministry_id", async (req, res) => {
 });
 
 // Ministry Absent Report (users in each ministry who did NOT check in for the event)
-router.get("/ministry-absent/:event_id/:ministry_id?", async (req, res) => {
-  const { event_id, ministry_id } = req.params;
+// Note: ministry_id passed as query param to avoid path-to-regexp error
+router.get("/ministry-absent/:event_id", async (req, res) => {
+  const event_id = req.params.event_id;
+  const ministry_id = req.query.ministry_id
+    ? parseInt(req.query.ministry_id, 10)
+    : null;
 
   try {
     let query = `
@@ -120,7 +124,7 @@ router.get("/ministry-absent/:event_id/:ministry_id?", async (req, res) => {
 
     if (ministry_id) {
       query += " AND m.id = $2";
-      params.push(parseInt(ministry_id, 10));
+      params.push(ministry_id);
     }
 
     query += " ORDER BY m.name, u.last_name";

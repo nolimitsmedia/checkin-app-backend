@@ -33,7 +33,7 @@ router.get("/elders", authenticate, async (req, res) => {
   }
 });
 
-// GET /api/users?search=Jane (with family_name)
+// GET /api/users?search=Jane (with improved phone search)
 router.get("/", authenticate, async (req, res) => {
   const searchRaw = req.query.search;
   const search = searchRaw ? searchRaw.toLowerCase() : null;
@@ -44,12 +44,14 @@ router.get("/", authenticate, async (req, res) => {
         SELECT CONCAT('user-', u.id) AS id, u.first_name, u.last_name, u.phone, u.role, u.avatar, u.family_id, f.family_name
         FROM users u
         LEFT JOIN families f ON u.family_id = f.id
-        WHERE LOWER(u.first_name) LIKE $1 OR LOWER(u.last_name) LIKE $1 OR u.phone LIKE $2
+        WHERE LOWER(u.first_name) LIKE $1 OR LOWER(u.last_name) LIKE $1
+          OR regexp_replace(u.phone, '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
         UNION ALL
         SELECT CONCAT('elder-', e.id) AS id, e.first_name, e.last_name, e.phone, e.role, e.avatar, e.family_id, f.family_name
         FROM elders e
         LEFT JOIN families f ON e.family_id = f.id
-        WHERE LOWER(e.first_name) LIKE $1 OR LOWER(e.last_name) LIKE $1 OR e.phone LIKE $2
+        WHERE LOWER(e.first_name) LIKE $1 OR LOWER(e.last_name) LIKE $1
+          OR regexp_replace(e.phone, '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
       `;
       const params = [`%${search}%`, `%${search}%`];
 

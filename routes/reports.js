@@ -43,6 +43,22 @@ router.get("/attendees", async (req, res) => {
   }
 });
 
+// ✅ Ministries List for Dropdown
+router.get("/ministries", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT id, name
+      FROM ministries
+      WHERE is_active = true
+      ORDER BY name
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Error fetching ministries:", err);
+    res.status(500).json({ message: "Failed to fetch ministries" });
+  }
+});
+
 // ✅ NEW: Ministry Attendance Report (for any ministry, like Overseers/Staff)
 router.get("/ministry-attendance/:ministry_id", async (req, res) => {
   const ministry_id = parseInt(req.params.ministry_id, 10);
@@ -81,11 +97,11 @@ router.get("/ministry-attendance/:ministry_id", async (req, res) => {
 });
 
 // ✅ B. Ministry Absent Report (users in each ministry who did NOT check in for the event)
-router.get("/ministry-absent/:event_id", async (req, res) => {
-  const { event_id } = req.params;
+router.get("/ministry-absent/:event_id/:ministry_id?", async (req, res) => {
+  const { event_id, ministry_id } = req.params;
+
   try {
-    const result = await db.query(
-      `
+    let query = `
       SELECT
         u.id AS user_id,
         u.first_name,
@@ -99,10 +115,17 @@ router.get("/ministry-absent/:event_id", async (req, res) => {
         SELECT user_id FROM check_ins 
         WHERE event_id = $1 AND user_id IS NOT NULL
       )
-      ORDER BY m.name, u.last_name
-    `,
-      [event_id]
-    );
+    `;
+    const params = [event_id];
+
+    if (ministry_id) {
+      query += " AND m.id = $2";
+      params.push(parseInt(ministry_id, 10));
+    }
+
+    query += " ORDER BY m.name, u.last_name";
+
+    const result = await db.query(query, params);
     res.json(result.rows);
   } catch (err) {
     console.error("Error fetching ministry absent report:", err);

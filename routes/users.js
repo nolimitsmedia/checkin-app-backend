@@ -379,19 +379,29 @@ router.post("/", authenticate, async (req, res) => {
     req.body;
 
   // Basic validations
-  if (!first_name || !last_name || !email || !role) {
+  if (!first_name || !last_name || !role) {
     return res.status(400).json({ message: "Missing required fields." });
   }
 
   role = role.toLowerCase();
 
-  if (role !== "user" && role !== "elder") {
+  if (
+    role !== "member" &&
+    role !== "elder" &&
+    role !== "volunteer" &&
+    role !== "staff"
+  ) {
     return res
       .status(400)
-      .json({ message: "Role must be either 'user' or 'elder'." });
+      .json({
+        message: "Role must be one of: member, elder, volunteer, or staff.",
+      });
   }
 
-  const isElder = role === "elder";
+  // Normalize role: store 'member' as 'user' internally to match users table
+  const dbRole = role === "member" ? "user" : role;
+
+  const isElder = dbRole === "elder";
 
   try {
     const result = await db.query(
@@ -403,9 +413,9 @@ router.post("/", authenticate, async (req, res) => {
       [
         first_name,
         last_name,
-        email,
+        email || null,
         phone || null,
-        role,
+        dbRole,
         avatar || null,
         family_id || null,
         gender || null,

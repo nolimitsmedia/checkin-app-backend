@@ -375,17 +375,23 @@ router.delete("/:id", authenticate, async (req, res) => {
 
 // POST /api/users — create a new user or elder
 router.post("/", authenticate, async (req, res) => {
-  const {
-    first_name,
-    last_name,
-    email,
-    phone,
-    role,
-    avatar,
-    family_id,
-    gender,
-  } = req.body;
-  const isElder = role?.toLowerCase() === "elder";
+  let { first_name, last_name, email, phone, role, avatar, family_id, gender } =
+    req.body;
+
+  // Basic validations
+  if (!first_name || !last_name || !email || !role) {
+    return res.status(400).json({ message: "Missing required fields." });
+  }
+
+  role = role.toLowerCase();
+
+  if (role !== "user" && role !== "elder") {
+    return res
+      .status(400)
+      .json({ message: "Role must be either 'user' or 'elder'." });
+  }
+
+  const isElder = role === "elder";
 
   try {
     const result = await db.query(
@@ -398,8 +404,8 @@ router.post("/", authenticate, async (req, res) => {
         first_name,
         last_name,
         email,
-        phone,
-        role.toLowerCase(),
+        phone || null,
+        role,
         avatar || null,
         family_id || null,
         gender || null,
@@ -408,8 +414,13 @@ router.post("/", authenticate, async (req, res) => {
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error("❌ Error creating user:", err.message);
-    res.status(500).json({ message: "Failed to create user" });
+    console.error("❌ Error creating user:", err);
+
+    if (err.code === "23505") {
+      return res.status(409).json({ message: "Email already exists." });
+    }
+
+    res.status(500).json({ message: "Failed to create user." });
   }
 });
 

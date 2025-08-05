@@ -24,7 +24,7 @@ router.get("/all", authenticate, async (req, res) => {
 router.get("/elders", authenticate, async (req, res) => {
   try {
     const result = await db.query(
-      "SELECT id, first_name, last_name FROM elders"
+      "SELECT id, first_name, last_name, phone FROM elders"
     );
     res.json(result.rows);
   } catch (err) {
@@ -135,6 +135,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
         u.first_name,
         u.last_name,
         u.email,
+        u.phone,
         u.role,
         u.avatar,
         u.active,
@@ -142,14 +143,14 @@ router.get("/masterlist", authenticate, async (req, res) => {
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.name), NULL) AS ministries,
         ARRAY_REMOVE(ARRAY_AGG(DISTINCT m.id), NULL) AS ministry_ids
       FROM (
-        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM users
+        SELECT id, first_name, last_name, email, phone, role, gender, avatar, COALESCE(active, true) as active FROM users
         UNION ALL
-        SELECT id, first_name, last_name, email, role, gender, avatar, COALESCE(active, true) as active FROM elders
+        SELECT id, first_name, last_name, email, phone, role, gender, avatar, COALESCE(active, true) as active FROM elders
       ) u
       LEFT JOIN user_ministries um ON um.user_id = u.id AND u.role != 'elder'
       LEFT JOIN elder_ministries em ON em.elder_id = u.id AND u.role = 'elder'
       LEFT JOIN ministries m ON (m.id = um.ministry_id OR m.id = em.ministry_id)
-      GROUP BY u.id, u.first_name, u.last_name, u.email, u.role, u.avatar, u.active, u.gender
+      GROUP BY u.id, u.first_name, u.last_name, u.email, u.phone, u.role, u.avatar, u.active, u.gender
       ORDER BY u.first_name, u.last_name
     `);
 
@@ -160,7 +161,7 @@ router.get("/masterlist", authenticate, async (req, res) => {
   }
 });
 
-// PUT /api/users/:id — updates all info, ministries, avatar, gender, active, etc.
+// PUT /api/users/:id — updates all info, ministries, avatar, gender, active, phone etc.
 // Handles role changes between users and elders by moving data accordingly
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
@@ -178,6 +179,7 @@ router.put("/:id", authenticate, async (req, res) => {
     first_name,
     last_name,
     email,
+    phone,
     role,
     family_id,
     avatar,
@@ -276,12 +278,13 @@ router.put("/:id", authenticate, async (req, res) => {
 
       const result = await client.query(
         `UPDATE ${targetTable}
-         SET first_name = $1, last_name = $2, email = $3, role = $4, family_id = $5, avatar = $6, active = $7, gender = $8
-         WHERE id = $9 RETURNING *`,
+         SET first_name = $1, last_name = $2, email = $3, phone = $4, role = $5, family_id = $6, avatar = $7, active = $8, gender = $9
+         WHERE id = $10 RETURNING *`,
         [
           first_name,
           last_name,
           email,
+          phone || null,
           role,
           family_id || null,
           avatar || null,
@@ -391,11 +394,9 @@ router.post("/", authenticate, async (req, res) => {
     role !== "volunteer" &&
     role !== "staff"
   ) {
-    return res
-      .status(400)
-      .json({
-        message: "Role must be one of: member, elder, volunteer, or staff.",
-      });
+    return res.status(400).json({
+      message: "Role must be one of: member, elder, volunteer, or staff.",
+    });
   }
 
   // Normalize role: store 'member' as 'user' internally to match users table

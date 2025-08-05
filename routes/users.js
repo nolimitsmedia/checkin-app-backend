@@ -614,7 +614,6 @@ router.get("/masterlist", authenticate, async (req, res) => {
 
 // PUT /api/users/:id — updates all info, ministries, avatar, gender, active, phone etc.
 // Handles role changes between users and elders by moving data accordingly
-// PUT /api/users/:id
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {

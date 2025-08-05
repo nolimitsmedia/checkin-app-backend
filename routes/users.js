@@ -242,7 +242,7 @@ router.put("/:id", authenticate, async (req, res) => {
           first_name || oldUser.first_name,
           last_name || oldUser.last_name,
           email || oldUser.email,
-          oldUser.phone,
+          phone !== undefined ? phone : oldUser.phone,
           role,
           avatar || oldUser.avatar,
           family_id || oldUser.family_id,
@@ -290,7 +290,7 @@ router.put("/:id", authenticate, async (req, res) => {
           first_name,
           last_name,
           email,
-          phone, // Fixed: save exact value, including empty string if provided
+          phone !== undefined ? phone : null, // This line ensures phone saves even if empty string
           role,
           family_id || null,
           avatar || null,

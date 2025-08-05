@@ -290,7 +290,7 @@ router.put("/:id", authenticate, async (req, res) => {
           first_name,
           last_name,
           email,
-          phone || null,
+          phone, // Fixed: save exact value, including empty string if provided
           role,
           family_id || null,
           avatar || null,
@@ -442,5 +442,3 @@ router.post("/", authenticate, async (req, res) => {
 });
 
 module.exports = router;
-
-//another update

@@ -154,7 +154,13 @@ router.get("/masterlist", authenticate, async (req, res) => {
       ORDER BY u.first_name, u.last_name
     `);
 
-    res.json(result.rows);
+    // Map 'user' role to 'member' for frontend display
+    const rows = result.rows.map((row) => ({
+      ...row,
+      role: row.role === "user" ? "member" : row.role,
+    }));
+
+    res.json(rows);
   } catch (err) {
     console.error("❌ Error in masterlist:", err.message);
     res.status(500).send("Server error");
@@ -436,5 +442,3 @@ router.post("/", authenticate, async (req, res) => {
 });
 
 module.exports = router;
-
-//fix updated

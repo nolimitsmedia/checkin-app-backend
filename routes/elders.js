@@ -7,7 +7,7 @@ const authenticate = require("../middleware/authenticate");
 router.get("/", authenticate, async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT id, first_name, last_name, email, role
+      SELECT id, first_name, last_name, email, phone, alt_phone, role
       FROM elders
       ORDER BY first_name, last_name
     `);
@@ -20,7 +20,7 @@ router.get("/", authenticate, async (req, res) => {
 
 // ✅ POST /api/elders — create new elder
 router.post("/", authenticate, async (req, res) => {
-  const { first_name, last_name, email, phone, role } = req.body;
+  const { first_name, last_name, email, phone, alt_phone, role } = req.body;
 
   if (role !== "elder") {
     return res.status(400).json({ message: "Role must be 'elder'" });
@@ -28,10 +28,17 @@ router.post("/", authenticate, async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO elders (first_name, last_name, email, phone, role)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO elders (first_name, last_name, email, phone, alt_phone, role)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [first_name, last_name, email || null, phone || null, role]
+      [
+        first_name,
+        last_name,
+        email || null,
+        phone || null,
+        alt_phone || null,
+        role,
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -70,11 +77,11 @@ router.get("/:id/details", authenticate, async (req, res) => {
   }
 });
 
-// PATCH /api/users/:id/active
+// PATCH /api/elders/:id/active
 router.patch("/:id/active", async (req, res) => {
   const { id } = req.params;
   const { active } = req.body;
-  await db.query("UPDATE users SET active=$1 WHERE id=$2", [active, id]);
+  await db.query("UPDATE elders SET active=$1 WHERE id=$2", [active, id]);
   res.json({ success: true });
 });
 

@@ -208,4 +208,25 @@ router.get("/elder-absent/:elder_id/:event_id", async (req, res) => {
   }
 });
 
+// GET /reports/roster/:ministry_id
+router.get("/roster/:ministry_id", async (req, res) => {
+  const { ministry_id } = req.params;
+
+  try {
+    const usersQuery = `
+      SELECT u.id, u.first_name, u.last_name, u.email, u.phone, m.name AS ministry
+      FROM users u
+      JOIN user_ministries um ON um.user_id = u.id
+      JOIN ministries m ON m.id = um.ministry_id
+      WHERE m.id = $1
+      ORDER BY u.last_name ASC
+    `;
+    const users = await db.query(usersQuery, [ministry_id]);
+    res.json(users.rows);
+  } catch (err) {
+    console.error("Roster report error:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 module.exports = router;

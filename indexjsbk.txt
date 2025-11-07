@@ -148,3 +148,152 @@ app.listen(port, () => {
     console.log("✅ Subdomain regex allowed:", allowMtGileadSub.toString());
   }
 });
+
+
+//new index.js
+
+// server-api/index.js
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const path = require("path");
+
+const app = express();
+
+// In production (Render/Heroku/etc.) respect platform PORT
+const port = process.env.PORT || 3001;
+
+// Trust reverse proxies (Render, Nginx) so req.ip, https redirects, etc. are correct
+app.set("trust proxy", 1);
+
+/* -----------------------------------------------------------------------------
+ * CORS
+ * --------------------------------------------------------------------------- */
+const STATIC_ALLOWED = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+  "https://nolimitsmedia.github.io",
+  "https://checkin.mtgilead.org",
+];
+
+const envList = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const allowedOrigins = new Set([...STATIC_ALLOWED, ...envList]);
+
+// Allow *.mtgilead.org subdomains, if needed later
+const allowMtGileadSub = /^https:\/\/([a-z0-9-]+\.)*mtgilead\.org$/i;
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.has(origin) || allowMtGileadSub.test(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error(`Not allowed by CORS: ${origin}`));
+    },
+    credentials: true,
+  })
+);
+
+/* -----------------------------------------------------------------------------
+ * Body parsing
+ * --------------------------------------------------------------------------- */
+app.use(bodyParser.json({ limit: "10mb" }));
+app.use(bodyParser.urlencoded({ extended: true, limit: "10mb" }));
+
+/* -----------------------------------------------------------------------------
+ * Routes
+ * --------------------------------------------------------------------------- */
+
+// Core route modules
+const usersRoutes = require("./routes/users");
+const adminsRoutes = require("./routes/admins");
+const eventsRoutes = require("./routes/events");
+const checkinsRoutes = require("./routes/checkins");
+const reportsRoutes = require("./routes/reports");
+const authRoutes = require("./routes/auth");
+const dashboardRoutes = require("./routes/dashboard");
+const elderRoutes = require("./routes/elders");
+const familySearch = require("./routes/familySearch");
+const uploadsRoute = require("./routes/uploads");
+const familiesRouter = require("./routes/families");
+const ministriesRouter = require("./routes/ministries");
+const emailRoutes = require("./routes/email");
+
+// ✅ NEW: Kiosk routes
+const kioskRoutes = require("./routes/kiosk");
+
+// Register API routes
+app.use("/api/users", usersRoutes);
+app.use("/api/admins", adminsRoutes);
+app.use("/api/events", eventsRoutes);
+app.use("/api/checkins", checkinsRoutes);
+app.use("/api/reports", reportsRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/elders", elderRoutes);
+app.use("/api/familySearch", familySearch);
+app.use("/api/uploads", uploadsRoute);
+app.use("/api/families", familiesRouter);
+app.use("/api/ministries", ministriesRouter);
+app.use("/api/import", require("./routes/import"));
+app.use("/api/email", emailRoutes);
+
+// ✅ NEW: mount kiosk under /api/kiosk (this is what your frontend calls)
+app.use("/api/kiosk", kioskRoutes);
+
+// Serve static uploads (avatars, etc.)
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+/* -----------------------------------------------------------------------------
+ * Health check / root
+ * --------------------------------------------------------------------------- */
+app.get("/", (_req, res) => {
+  res.json({
+    ok: true,
+    name: "Check-in API",
+    env: process.env.NODE_ENV || "development",
+    time: new Date().toISOString(),
+  });
+});
+
+/* -----------------------------------------------------------------------------
+ * Error handlers
+ * --------------------------------------------------------------------------- */
+// 404 for unknown routes
+app.use((req, res, _next) => {
+  res.status(404).json({ message: "Not Found" });
+});
+
+// Generic error handler (includes CORS rejections)
+app.use((err, _req, res, _next) => {
+  console.error("Server error:", err?.stack || err?.message || err);
+  const status =
+    err && typeof err.status === "number"
+      ? err.status
+      : err && err.message && String(err.message).includes("CORS")
+      ? 403
+      : 500;
+  res.status(status).json({ message: err.message || "Internal Server Error" });
+});
+
+/* -----------------------------------------------------------------------------
+ * Start server
+ * --------------------------------------------------------------------------- */
+app.listen(port, () => {
+  console.log(`✅ Server is running on http://localhost:${port}`);
+  if (allowedOrigins.size) {
+    console.log("✅ CORS allowed origins:");
+    [...allowedOrigins].forEach((o) => console.log("   -", o));
+    console.log("✅ Subdomain regex allowed:", allowMtGileadSub.toString());
+  }
+});

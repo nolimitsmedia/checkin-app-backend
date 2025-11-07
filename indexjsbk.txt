@@ -15,7 +15,13 @@ app.set("trust proxy", 1);
 
 /* -----------------------------------------------------------------------------
  * CORS
- * --------------------------------------------------------------------------- */
+ * -----------------------------------------------------------------------------
+ * Allow:
+ *  - Local dev (React)
+ *  - GitHub Pages (nolimitsmedia.github.io)
+ *  - Your custom subdomain (e.g., https://checkin.mtgilead.org)
+ *  - Any additional origins via env (CORS_ORIGINS comma-separated)
+ */
 const STATIC_ALLOWED = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -40,10 +46,13 @@ const allowMtGileadSub = /^https:\/\/([a-z0-9-]+\.)*mtgilead\.org$/i;
 app.use(
   cors({
     origin(origin, callback) {
+      // Requests with no origin (mobile apps, curl, Postman) are allowed
       if (!origin) return callback(null, true);
+
       if (allowedOrigins.has(origin) || allowMtGileadSub.test(origin)) {
         return callback(null, true);
       }
+
       return callback(new Error(`Not allowed by CORS: ${origin}`));
     },
     credentials: true,
@@ -52,7 +61,8 @@ app.use(
 
 /* -----------------------------------------------------------------------------
  * Body parsing
- * --------------------------------------------------------------------------- */
+ * -----------------------------------------------------------------------------
+ */
 app.use(bodyParser.json({ limit: "10mb" }));
 app.use(bodyParser.urlencoded({ extended: true, limit: "10mb" }));
 
@@ -73,10 +83,8 @@ const familySearch = require("./routes/familySearch");
 const uploadsRoute = require("./routes/uploads");
 const familiesRouter = require("./routes/families");
 const ministriesRouter = require("./routes/ministries");
+// NEW: Email route (stub for M365/SMTP integration)
 const emailRoutes = require("./routes/email");
-
-// ✅ NEW: Kiosk routes
-const kioskRoutes = require("./routes/kiosk");
 
 // Register API routes
 app.use("/api/users", usersRoutes);
@@ -93,9 +101,6 @@ app.use("/api/families", familiesRouter);
 app.use("/api/ministries", ministriesRouter);
 app.use("/api/import", require("./routes/import"));
 app.use("/api/email", emailRoutes);
-
-// ✅ NEW: mount kiosk under /api/kiosk (this is what your frontend calls)
-app.use("/api/kiosk", kioskRoutes);
 
 // Serve static uploads (avatars, etc.)
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));

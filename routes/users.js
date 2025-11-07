@@ -1,9 +1,12 @@
+// server-api/routes/users.js
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const authenticate = require("../middleware/authenticate");
 
-// GET /users/all - Fetch all users with ministry data
+/* ============================================================================
+ * GET /users/all - Fetch all users with ministry data
+ * ========================================================================== */
 router.get("/all", authenticate, async (req, res) => {
   try {
     const result = await db.query(`
@@ -20,7 +23,9 @@ router.get("/all", authenticate, async (req, res) => {
   }
 });
 
-// GET /api/users/elders
+/* ============================================================================
+ * GET /api/users/elders
+ * ========================================================================== */
 router.get("/elders", authenticate, async (req, res) => {
   try {
     const result = await db.query(
@@ -33,7 +38,37 @@ router.get("/elders", authenticate, async (req, res) => {
   }
 });
 
-// GET /api/users?search=Jane (with improved phone search)
+/* ============================================================================
+ * NEW: GET /api/users/lookup?phone=...  (Kiosk/self-service friendly)
+ * - Finds users by phone or alt_phone (digits-only matching)
+ * ========================================================================== */
+router.get("/lookup", authenticate, async (req, res) => {
+  const phoneRaw = String(req.query.phone || "");
+  const digits = phoneRaw.replace(/\D/g, "");
+  if (!digits) return res.json([]);
+
+  try {
+    const { rows } = await db.query(
+      `
+      SELECT id, first_name, last_name, phone, alt_phone, role, avatar
+      FROM users
+      WHERE regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') LIKE $1
+         OR regexp_replace(COALESCE(alt_phone,''), '[^0-9]', '', 'g') LIKE $1
+      ORDER BY last_name, first_name
+      LIMIT 25
+    `,
+      [`%${digits}%`]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error("lookup error:", e);
+    res.status(500).json({ message: "Lookup failed" });
+  }
+});
+
+/* ============================================================================
+ * GET /api/users?search=Jane  (includes elders; improved phone search)
+ * ========================================================================== */
 router.get("/", authenticate, async (req, res) => {
   const searchRaw = req.query.search;
   const search = searchRaw ? searchRaw.toLowerCase() : null;
@@ -45,15 +80,15 @@ router.get("/", authenticate, async (req, res) => {
         FROM users u
         LEFT JOIN families f ON u.family_id = f.id
         WHERE LOWER(u.first_name) LIKE $1 OR LOWER(u.last_name) LIKE $1
-          OR regexp_replace(u.phone, '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
-          OR regexp_replace(u.alt_phone, '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
+          OR regexp_replace(COALESCE(u.phone,''), '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
+          OR regexp_replace(COALESCE(u.alt_phone,''), '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
         UNION ALL
         SELECT CONCAT('elder-', e.id) AS id, e.first_name, e.last_name, e.phone, e.alt_phone, e.role, e.avatar, e.family_id, f.family_name
         FROM elders e
         LEFT JOIN families f ON e.family_id = f.id
         WHERE LOWER(e.first_name) LIKE $1 OR LOWER(e.last_name) LIKE $1
-          OR regexp_replace(e.phone, '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
-          OR regexp_replace(e.alt_phone, '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
+          OR regexp_replace(COALESCE(e.phone,''), '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
+          OR regexp_replace(COALESCE(e.alt_phone,''), '[^0-9]', '', 'g') LIKE regexp_replace($2, '[^0-9]', '', 'g')
       `;
       const params = [`%${search}%`, `%${search}%`];
 
@@ -78,7 +113,9 @@ router.get("/", authenticate, async (req, res) => {
   }
 });
 
-// GET /api/users/:id/details
+/* ============================================================================
+ * GET /api/users/:id/details
+ * ========================================================================== */
 router.get("/:id/details", authenticate, async (req, res) => {
   const rawId = req.params.id;
   const isElder = rawId.startsWith("elder-");
@@ -128,7 +165,11 @@ router.get("/:id/details", authenticate, async (req, res) => {
   }
 });
 
-// GET /api/users/masterlist
+/* ============================================================================
+ * GET /api/users/masterlist
+ * - Returns combined users + elders, with arrays of ministries + ministry_ids
+ * - Maps role 'user' → 'member' for the frontend
+ * ========================================================================== */
 router.get("/masterlist", authenticate, async (req, res) => {
   try {
     const result = await db.query(`
@@ -157,7 +198,6 @@ router.get("/masterlist", authenticate, async (req, res) => {
       ORDER BY u.first_name, u.last_name
     `);
 
-    // Map 'user' role to 'member' for frontend display
     const rows = result.rows.map((row) => ({
       ...row,
       role: row.role === "user" ? "member" : row.role,
@@ -170,16 +210,24 @@ router.get("/masterlist", authenticate, async (req, res) => {
   }
 });
 
-// PUT /api/users/:id — updates all info, ministries, avatar, gender, active, phone etc.
-// Handles role changes between users and elders by moving data accordingly
+/* ============================================================================
+ * PUT /api/users/:id
+ * - Updates user/elder record, ministries, etc.
+ * - Handles cross-table moves when role changes between 'elder' and 'user'
+ * - Hardened against NaN path param: falls back to body.id (e.g., "user-2264")
+ * ========================================================================== */
 router.put("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {
     return res.status(403).json({ message: "Unauthorized" });
   }
 
-  const rawId = req.params.id;
-  const id = parseInt(rawId.replace(/^[^\d]+/, ""), 10);
+  // Fallback: if path id is mangled (e.g., "NaN"), try body.id
+  let rawId = req.params.id;
+  if (!/\d/.test(String(rawId || "")) && typeof req.body.id === "string") {
+    rawId = req.body.id;
+  }
+  const id = parseInt(String(rawId).replace(/^[^\d]+/, ""), 10);
   if (isNaN(id)) {
     return res.status(400).json({ message: "Invalid ID format" });
   }
@@ -199,7 +247,9 @@ router.put("/:id", authenticate, async (req, res) => {
   } = req.body;
 
   console.log("Update user payload received:", {
-    id,
+    rawId: req.params.id,
+    fallbackId: req.body.id,
+    parsedId: id,
     first_name,
     last_name,
     email,
@@ -213,8 +263,8 @@ router.put("/:id", authenticate, async (req, res) => {
     ministry_ids,
   });
 
-  const oldRole = rawId.startsWith("elder-") ? "elder" : "user";
-  const newRole = role.toLowerCase();
+  const oldRole = String(rawId).startsWith("elder-") ? "elder" : "user";
+  const newRole = (role || "").toLowerCase();
 
   const client = await db.connect();
 
@@ -225,10 +275,7 @@ router.put("/:id", authenticate, async (req, res) => {
     const newIsElder = newRole === "elder";
 
     if (oldIsElder !== newIsElder) {
-      // Role changed between elders/users → move data
-      // (not modified, keep as is to maintain logic)
-
-      // 1. Fetch existing user data from old table
+      // Move rows between elders <-> users
       const oldTable = oldIsElder ? "elders" : "users";
       const oldRelationTable = oldIsElder
         ? "elder_ministries"
@@ -251,72 +298,107 @@ router.put("/:id", authenticate, async (req, res) => {
       }
       const oldUser = oldUserRows[0];
 
+      const activeVal =
+        typeof active === "string"
+          ? active === "true"
+          : active === undefined
+          ? oldUser.active
+          : !!active;
+
       const { rows: newUserRows } = await client.query(
         `INSERT INTO ${newTable} (first_name, last_name, email, phone, alt_phone, role, avatar, family_id, gender, active)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING *`,
         [
-          first_name || oldUser.first_name,
-          last_name || oldUser.last_name,
-          email || oldUser.email,
+          first_name ?? oldUser.first_name,
+          last_name ?? oldUser.last_name,
+          email ?? oldUser.email,
           phone !== undefined ? phone : oldUser.phone,
           alt_phone !== undefined ? alt_phone : oldUser.alt_phone,
-          role,
-          avatar || oldUser.avatar,
-          family_id || oldUser.family_id,
-          gender || oldUser.gender,
-          typeof active === "string" ? active === "true" : !!active,
+          role || oldUser.role,
+          avatar ?? oldUser.avatar,
+          family_id ?? oldUser.family_id,
+          gender ?? oldUser.gender,
+          activeVal,
         ]
       );
       const newUser = newUserRows[0];
 
-      // 3. Move ministries
+      // Clear old relations and add new
       await client.query(
         `DELETE FROM ${oldRelationTable} WHERE ${oldRoleIdColumn} = $1`,
         [id]
       );
-      if (ministry_ids.length > 0) {
+      if (Array.isArray(ministry_ids) && ministry_ids.length > 0) {
         const { rows: validMinistries } = await client.query(
           `SELECT id FROM ministries WHERE id = ANY($1)`,
           [ministry_ids]
         );
-        const validIds = validMinistries.map((m) => m.id);
-        for (const ministryId of validIds) {
+        for (const m of validMinistries) {
           await client.query(
             `INSERT INTO ${newRelationTable} (${newRoleIdColumn}, ministry_id) VALUES ($1, $2)`,
-            [newUser.id, ministryId]
+            [newUser.id, m.id]
           );
         }
       }
 
-      // 4. Delete old user from old table
+      // Remove old row
       await client.query(`DELETE FROM ${oldTable} WHERE id = $1`, [id]);
 
       await client.query("COMMIT");
       return res.json(newUser);
     } else {
-      // Role changed within same table or unchanged role - just update normally
+      // Update inside same table
       const targetTable = newIsElder ? "elders" : "users";
       const relationTable = newIsElder ? "elder_ministries" : "user_ministries";
       const roleIdColumn = newIsElder ? "elder_id" : "user_id";
 
+      const activeVal =
+        active === undefined
+          ? null
+          : typeof active === "string"
+          ? active === "true"
+          : !!active;
+
+      // Build SET clause dynamically so we don't overwrite with nulls inadvertently
+      const sets = [
+        "first_name = $1",
+        "last_name = $2",
+        "email = $3",
+        "phone = $4",
+        "alt_phone = $5",
+        "role = $6",
+        "family_id = $7",
+        "avatar = $8",
+        "gender = $9",
+      ];
+      const values = [
+        first_name ?? null,
+        last_name ?? null,
+        email ?? null,
+        phone !== undefined ? phone : null,
+        alt_phone !== undefined ? alt_phone : null,
+        role ?? (newIsElder ? "elder" : "user"),
+        family_id ?? null,
+        avatar ?? null,
+        gender ?? null,
+      ];
+
+      // active: only set if provided, otherwise keep existing
+      if (activeVal === null) {
+        // do not include "active" in UPDATE, keep existing value
+      } else {
+        sets.push("active = $10");
+        values.push(activeVal);
+      }
+
+      values.push(id);
+
       const result = await client.query(
         `UPDATE ${targetTable}
-         SET first_name = $1, last_name = $2, email = $3, phone = $4, alt_phone = $5, role = $6, family_id = $7, avatar = $8, active = $9, gender = $10
-         WHERE id = $11 RETURNING *`,
-        [
-          first_name,
-          last_name,
-          email,
-          phone !== undefined ? phone : null,
-          alt_phone !== undefined ? alt_phone : null,
-          role,
-          family_id || null,
-          avatar || null,
-          !!active,
-          gender || null,
-          id,
-        ]
+         SET ${sets.join(", ")}
+         WHERE id = $${values.length} RETURNING *`,
+        values
       );
 
       if (result.rowCount === 0) {
@@ -324,21 +406,20 @@ router.put("/:id", authenticate, async (req, res) => {
         return res.status(404).json({ message: "User not found" });
       }
 
+      // Update ministries
       await client.query(
         `DELETE FROM ${relationTable} WHERE ${roleIdColumn} = $1`,
         [id]
       );
-
-      if (ministry_ids.length > 0) {
+      if (Array.isArray(ministry_ids) && ministry_ids.length > 0) {
         const { rows: validMinistries } = await client.query(
           `SELECT id FROM ministries WHERE id = ANY($1)`,
           [ministry_ids]
         );
-        const validIds = validMinistries.map((m) => m.id);
-        for (const ministryId of validIds) {
+        for (const m of validMinistries) {
           await client.query(
             `INSERT INTO ${relationTable} (${roleIdColumn}, ministry_id) VALUES ($1, $2)`,
-            [id, ministryId]
+            [id, m.id]
           );
         }
       }
@@ -355,15 +436,38 @@ router.put("/:id", authenticate, async (req, res) => {
   }
 });
 
-// PATCH /api/users/:id/active
-router.patch("/:id/active", async (req, res) => {
-  const { id } = req.params;
-  const { active } = req.body;
-  await db.query("UPDATE users SET active=$1 WHERE id=$2", [active, id]);
-  res.json({ success: true });
+/* ============================================================================
+ * PATCH /api/users/:id/active   (protect + simple toggle)
+ * ========================================================================== */
+router.patch("/:id/active", authenticate, async (req, res) => {
+  const allowedRoles = ["admin", "super_admin"];
+  if (!allowedRoles.includes(req.user.role)) {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+
+  const id = parseInt(String(req.params.id).replace(/^[^\d]+/, ""), 10);
+  if (!Number.isFinite(id))
+    return res.status(400).json({ message: "Invalid id" });
+
+  const active =
+    typeof req.body.active === "string"
+      ? req.body.active === "true"
+      : !!req.body.active;
+
+  try {
+    await db.query("UPDATE users SET active=$1 WHERE id=$2", [active, id]);
+    res.json({ success: true });
+  } catch (e) {
+    console.error("PATCH active error:", e);
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to update active" });
+  }
 });
 
-// DELETE /api/users/:id
+/* ============================================================================
+ * DELETE /api/users/:id
+ * ========================================================================== */
 router.delete("/:id", authenticate, async (req, res) => {
   const allowedRoles = ["admin", "super_admin"];
   if (!allowedRoles.includes(req.user.role)) {
@@ -401,7 +505,9 @@ router.delete("/:id", authenticate, async (req, res) => {
   }
 });
 
-// POST /api/users — create a new user or elder
+/* ============================================================================
+ * POST /api/users — create a new user or elder
+ * ========================================================================== */
 router.post("/", authenticate, async (req, res) => {
   console.log("Create user request body:", req.body);
   let {

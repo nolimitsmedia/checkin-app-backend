@@ -121,6 +121,8 @@ app.use("/api/import", require("./routes/import"));
 app.use("/api/email", require("./routes/email"));
 app.use("/api/kiosk", require("./routes/kiosk"));
 
+app.use("/api/integrations", require("./routes/integrationsCognito"));
+
 /* ---------------------------------------------------------------------------
  * Static uploads
  * ------------------------------------------------------------------------- */

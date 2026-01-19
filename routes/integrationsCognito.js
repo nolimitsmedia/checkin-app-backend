@@ -150,40 +150,43 @@ function mapAddition(bodyRaw) {
     "first_name",
     "firstName",
     "FirstName",
-    "Firstname", // <- from your payload
+    "Firstname",
     "First Name",
+    "x3", // Cognito field id for First Name (from your payload)
   ]);
 
   const last_name = pick(e, [
     "last_name",
     "lastName",
-    "LastName", // <- from your payload
+    "LastName",
     "Last Name",
-    "Lastname",
+    "x5", // Last Name
   ]);
 
   const email = pick(e, [
     "email",
-    "Email", // <- from your payload
+    "Email",
     "Email Address",
     "E-mail",
-  ]);
-
-  const phone = pick(e, [
-    "phone",
-    "Phone", // <- from your payload
-    "Phone Number",
-    "Mobile",
-    "Cell",
+    "x6", // Email
   ]);
 
   const ministry = pick(e, [
     "ministry",
     "ministry_name",
-    "ApprovedMinistry", // <- from your payload
+    "ApprovedMinistry",
     "Approved Ministry",
     "Ministry",
-    "Ministry Approved",
+    "x8", // Approved Ministry
+  ]);
+
+  const phone = pick(e, [
+    "phone",
+    "Phone",
+    "Phone Number",
+    "Mobile",
+    "Cell",
+    "x9", // Phone
   ]);
 
   return { first_name, last_name, email, phone, ministry };

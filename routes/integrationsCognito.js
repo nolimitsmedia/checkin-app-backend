@@ -146,48 +146,11 @@ async function removeUserFromMinistry(user_id, ministry_id) {
 function mapAddition(bodyRaw) {
   const e = unwrapBody(bodyRaw);
 
-  const first_name = pick(e, [
-    "first_name",
-    "firstName",
-    "FirstName",
-    "Firstname",
-    "First Name",
-    "x3", // Cognito field id for First Name (from your payload)
-  ]);
-
-  const last_name = pick(e, [
-    "last_name",
-    "lastName",
-    "LastName",
-    "Last Name",
-    "x5", // Last Name
-  ]);
-
-  const email = pick(e, [
-    "email",
-    "Email",
-    "Email Address",
-    "E-mail",
-    "x6", // Email
-  ]);
-
-  const ministry = pick(e, [
-    "ministry",
-    "ministry_name",
-    "ApprovedMinistry",
-    "Approved Ministry",
-    "Ministry",
-    "x8", // Approved Ministry
-  ]);
-
-  const phone = pick(e, [
-    "phone",
-    "Phone",
-    "Phone Number",
-    "Mobile",
-    "Cell",
-    "x9", // Phone
-  ]);
+  const first_name = pick(e, ["first_name", "Firstname", "FirstName", "x3"]);
+  const last_name = pick(e, ["last_name", "LastName", "Lastname", "x5"]);
+  const email = pick(e, ["email", "Email", "x6"]);
+  const ministry = pick(e, ["ministry", "ApprovedMinistry", "Ministry", "x8"]);
+  const phone = pick(e, ["phone", "Phone", "x9"]);
 
   return { first_name, last_name, email, phone, ministry };
 }

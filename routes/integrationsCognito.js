@@ -21,10 +21,16 @@ function verifyWebhookSecret(req, res, next) {
   const got = headerSecret || querySecret;
 
   if (!got || got !== expected) {
+    console.warn("[Cognito] Invalid webhook secret", {
+      got: got ? `${got.slice(0, 3)}***` : null,
+      hasHeader: !!headerSecret,
+      hasQuery: !!querySecret,
+    });
     return res
       .status(401)
       .json({ ok: false, message: "Invalid webhook secret" });
   }
+
   next();
 }
 
@@ -132,20 +138,11 @@ async function removeUserFromMinistry(user_id, ministry_id) {
 }
 
 /* ------------------------- Mapping ------------------------- */
-/**
- * Based on your captured Cognito payload:
- * - body.entry.Firstname
- * - body.entry.LastName
- * - body.entry.Email
- * - body.entry.Phone
- * - body.entry.ApprovedMinistry
- *
- * We still allow your preferred JSON names too (first_name, last_name, ministry)
- * so this stays compatible if you later enforce JSON names everywhere.
- */
 function mapAddition(bodyRaw) {
   const e = unwrapBody(bodyRaw);
 
+  // Supports both JSON-names AND Cognito x-field IDs you captured:
+  // x3 first, x5 last, x6 email, x8 ministry, x9 phone
   const first_name = pick(e, ["first_name", "Firstname", "FirstName", "x3"]);
   const last_name = pick(e, ["last_name", "LastName", "Lastname", "x5"]);
   const email = pick(e, ["email", "Email", "x6"]);
@@ -158,11 +155,17 @@ function mapAddition(bodyRaw) {
 function mapRemoval(bodyRaw) {
   const e = unwrapBody(bodyRaw);
 
-  const email = pick(e, ["email", "Email", "Email Address", "E-mail"]);
-  const phone = pick(e, ["phone", "Phone", "Phone Number", "Mobile", "Cell"]);
+  // When you submit one Removal test, we can tighten these keys.
+  const email = pick(e, ["email", "Email", "Email Address", "E-mail", "x6"]);
+  const phone = pick(e, [
+    "phone",
+    "Phone",
+    "Phone Number",
+    "Mobile",
+    "Cell",
+    "x9",
+  ]);
 
-  // We haven't captured the removal form payload yet, so support likely names.
-  // When you submit one removal test, we can lock this to the exact key.
   const ministry = pick(e, [
     "ministry",
     "ministry_name",
@@ -172,6 +175,7 @@ function mapRemoval(bodyRaw) {
     "Ministry Removed",
     "MinistryToRemove",
     "Ministry to Remove",
+    "x8", // if you reuse same dropdown field id
   ]);
 
   return { email, phone, ministry };
@@ -184,8 +188,23 @@ router.post(
   "/cognito/volunteer-ministry/add",
   verifyWebhookSecret,
   async (req, res) => {
+    // ---- PING LOG: proves Cognito hit this endpoint ----
+    console.log("[Cognito ADD] HIT", {
+      at: new Date().toISOString(),
+      ip: req.headers["x-forwarded-for"] || req.ip,
+      secret_present:
+        !!req.query.secret || !!req.headers["x-nlm-webhook-secret"],
+      db_host: process.env.PGHOST || null,
+      db_name: process.env.PGDATABASE || null,
+      body_top_keys: Object.keys(req.body || {}),
+      entry_keys: Object.keys((req.body && req.body.entry) || {}),
+    });
+
     try {
       const payload = mapAddition(req.body);
+
+      // ---- PING LOG: shows parsed payload ----
+      console.log("[Cognito ADD] payload", payload);
 
       if (!payload.ministry) {
         return res.status(400).json({ ok: false, message: "Missing ministry" });
@@ -225,7 +244,7 @@ router.post(
         ministry_name: ministry.name,
       });
     } catch (err) {
-      console.error("Cognito add webhook error:", err);
+      console.error("[Cognito ADD] error:", err);
       return res.status(500).json({ ok: false, message: "Webhook failed" });
     }
   }
@@ -236,8 +255,18 @@ router.post(
   "/cognito/volunteer-ministry/remove",
   verifyWebhookSecret,
   async (req, res) => {
+    console.log("[Cognito REMOVE] HIT", {
+      at: new Date().toISOString(),
+      ip: req.headers["x-forwarded-for"] || req.ip,
+      db_host: process.env.PGHOST || null,
+      db_name: process.env.PGDATABASE || null,
+      body_top_keys: Object.keys(req.body || {}),
+      entry_keys: Object.keys((req.body && req.body.entry) || {}),
+    });
+
     try {
       const payload = mapRemoval(req.body);
+      console.log("[Cognito REMOVE] payload", payload);
 
       if (!payload.ministry) {
         return res.status(400).json({ ok: false, message: "Missing ministry" });
@@ -264,7 +293,6 @@ router.post(
       }
 
       const ministry = await ensureMinistryByName(payload.ministry);
-
       await removeUserFromMinistry(user.id, ministry.id);
 
       return res.json({
@@ -275,7 +303,7 @@ router.post(
         ministry_name: ministry.name,
       });
     } catch (err) {
-      console.error("Cognito remove webhook error:", err);
+      console.error("[Cognito REMOVE] error:", err);
       return res.status(500).json({ ok: false, message: "Webhook failed" });
     }
   }

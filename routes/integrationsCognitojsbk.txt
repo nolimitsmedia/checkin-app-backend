@@ -1,0 +1,601 @@
+// server-api/routes/integrationsCognito.js
+const express = require("express");
+const router = express.Router();
+const db = require("../db");
+
+/* ============================================================
+   Cognito Integrations (Volunteer Ministry Add / Update / Remove)
+   - Supports secret in query (?secret=...) OR header (x-nlm-webhook-secret)
+   - Includes detailed logs so you can see:
+     * which endpoint hit
+     * which secret source was used
+     * payload keys + mapped fields
+     * db updates performed
+   ============================================================ */
+
+const LOG_PREFIX = "[Cognito]";
+const nowIso = () => new Date().toISOString();
+
+function safeJson(obj) {
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    return '"[unserializable]"';
+  }
+}
+
+function logHit(tag, data) {
+  console.log(`${LOG_PREFIX} ${tag}`, data || "");
+}
+
+/* ------------------------- Secret Handling ------------------------- */
+/**
+ * Express typically decodes querystring values, but to be extra safe we:
+ * - compare raw strings
+ * - compare decoded variants
+ */
+function normalizeSecret(s) {
+  const raw = String(s || "").trim();
+  if (!raw) return "";
+  try {
+    // if already decoded, this is a no-op; if encoded, it will decode
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function secretsMatch(got, expected) {
+  const g0 = String(got || "").trim();
+  const e0 = String(expected || "").trim();
+  if (!g0 || !e0) return false;
+
+  if (g0 === e0) return true;
+
+  const g = normalizeSecret(g0);
+  const e = normalizeSecret(e0);
+
+  return g === e;
+}
+
+function verifyWebhookSecret(req, res, next) {
+  const expectedRaw = String(process.env.COGNITO_WEBHOOK_SECRET || "").trim();
+  if (!expectedRaw) {
+    logHit("ERROR", {
+      at: nowIso(),
+      message: "COGNITO_WEBHOOK_SECRET is not set; webhook endpoints disabled.",
+      path: req.originalUrl,
+    });
+    return res.status(500).json({
+      ok: false,
+      message:
+        "COGNITO_WEBHOOK_SECRET is not set (webhook endpoints are disabled).",
+    });
+  }
+
+  const headerSecret = String(req.headers["x-nlm-webhook-secret"] || "").trim();
+  const querySecret = String(req.query.secret || "").trim();
+
+  // prefer header if present, else query
+  const got = headerSecret || querySecret;
+  const source = headerSecret ? "header:x-nlm-webhook-secret" : "query:?secret";
+
+  if (!got || !secretsMatch(got, expectedRaw)) {
+    logHit("Invalid webhook secret", {
+      at: nowIso(),
+      path: req.originalUrl,
+      method: req.method,
+      source: source,
+      hasHeader: Boolean(headerSecret),
+      hasQuery: Boolean(querySecret),
+      got_preview: got ? `${String(got).slice(0, 3)}***` : null,
+      expected_preview: expectedRaw ? `${expectedRaw.slice(0, 3)}***` : null,
+      ip: (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+        .toString()
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .slice(0, 3)
+        .join(", "),
+    });
+    return res
+      .status(401)
+      .json({ ok: false, message: "Invalid webhook secret" });
+  }
+
+  // attach for downstream logs
+  req._cognitoSecretSource = source;
+  next();
+}
+
+/* ------------------------- Helpers ------------------------- */
+function digitsOnly(v) {
+  return String(v || "").replace(/\D/g, "");
+}
+
+function pick(obj, keys) {
+  for (const k of keys) {
+    if (obj && Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null) {
+      const v = String(obj[k]).trim();
+      if (v) return v;
+    }
+  }
+  return null;
+}
+
+/**
+ * Cognito “Post JSON Data to a Website” can send:
+ * - { entry: { ... } }
+ * - { ...fields... }
+ * Based on your latest working logs, it appears fields are top-level:
+ *   body_top_keys: ['Form','first_name','last_name','email','ministry','phone','Entry','Id']
+ */
+function unwrapBody(body) {
+  if (!body) return {};
+  return body.entry || body.data || body.fields || body;
+}
+
+async function findUser({ email, phone }) {
+  const emailNorm = email ? email.trim().toLowerCase() : null;
+  const phoneDigits = digitsOnly(phone);
+
+  if (emailNorm) {
+    const r = await db.query(
+      `SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1`,
+      [emailNorm]
+    );
+    if (r.rows[0]) return r.rows[0];
+  }
+
+  if (phoneDigits) {
+    const r = await db.query(
+      `
+      SELECT * FROM users
+      WHERE regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') = $1
+      LIMIT 1
+      `,
+      [phoneDigits]
+    );
+    if (r.rows[0]) return r.rows[0];
+  }
+
+  return null;
+}
+
+async function createUser({ first_name, last_name, email, phone }) {
+  const emailNorm = email ? email.trim().toLowerCase() : null;
+
+  const r = await db.query(
+    `
+    INSERT INTO users (first_name, last_name, email, phone, role, active)
+    VALUES ($1, $2, $3, $4, $5, true)
+    RETURNING *
+    `,
+    [first_name, last_name, emailNorm, phone || null, "volunteer"]
+  );
+  return r.rows[0];
+}
+
+async function updateUser(user_id, patch) {
+  // Only update fields provided (non-null, non-empty)
+  const sets = [];
+  const vals = [];
+  let i = 1;
+
+  const addSet = (col, val) => {
+    sets.push(`${col} = $${i++}`);
+    vals.push(val);
+  };
+
+  if (patch.first_name) addSet("first_name", patch.first_name);
+  if (patch.last_name) addSet("last_name", patch.last_name);
+  if (patch.email) addSet("email", patch.email.trim().toLowerCase());
+  if (patch.phone) addSet("phone", patch.phone);
+
+  if (!sets.length) {
+    const r0 = await db.query(`SELECT * FROM users WHERE id = $1`, [user_id]);
+    return r0.rows[0] || null;
+  }
+
+  vals.push(user_id);
+  const r = await db.query(
+    `
+    UPDATE users
+    SET ${sets.join(", ")}
+    WHERE id = $${i}
+    RETURNING *
+    `,
+    vals
+  );
+  return r.rows[0] || null;
+}
+
+async function ensureMinistryByName(name) {
+  const n = String(name || "").trim();
+  if (!n) throw new Error("Missing ministry");
+
+  let r = await db.query(
+    `SELECT id, name, COALESCE(is_active, true) AS is_active
+     FROM ministries
+     WHERE LOWER(name) = LOWER($1)
+     LIMIT 1`,
+    [n]
+  );
+  if (r.rows[0]) return r.rows[0];
+
+  r = await db.query(
+    `INSERT INTO ministries (name, is_active)
+     VALUES ($1, true)
+     RETURNING id, name, COALESCE(is_active, true) AS is_active`,
+    [n]
+  );
+  return r.rows[0];
+}
+
+async function addUserToMinistry(user_id, ministry_id) {
+  await db.query(
+    `INSERT INTO user_ministries (user_id, ministry_id)
+     VALUES ($1, $2)
+     ON CONFLICT DO NOTHING`,
+    [user_id, ministry_id]
+  );
+}
+
+async function removeUserFromMinistry(user_id, ministry_id) {
+  await db.query(
+    `DELETE FROM user_ministries WHERE user_id = $1 AND ministry_id = $2`,
+    [user_id, ministry_id]
+  );
+}
+
+/* ------------------------- Field Mapping ------------------------- */
+/**
+ * Based on your WORKING “Addition” payload keys:
+ *   first_name, last_name, email, phone, ministry
+ * plus older captured payloads had:
+ *   Firstname, LastName, Email, Phone, ApprovedMinistry
+ * and sometimes Cognito internal IDs (x3, x5, x6, x8, x9)
+ */
+function mapAddition(bodyRaw) {
+  const e = unwrapBody(bodyRaw);
+
+  const first_name = pick(e, ["first_name", "Firstname", "FirstName", "x3"]);
+  const last_name = pick(e, ["last_name", "LastName", "Lastname", "x5"]);
+  const email = pick(e, ["email", "Email", "x6"]);
+  const phone = pick(e, ["phone", "Phone", "x9"]);
+  const ministry = pick(e, ["ministry", "ApprovedMinistry", "Ministry", "x8"]);
+
+  return { first_name, last_name, email, phone, ministry };
+}
+
+/**
+ * Removal form (recommended JSON names):
+ *   email OR phone  (at least one)
+ *   ministry        (the ministry to remove)
+ *
+ * We also support common alternatives:
+ *   ministry_to_remove, removed_ministry, RemovedMinistry, etc.
+ */
+function mapRemoval(bodyRaw) {
+  const e = unwrapBody(bodyRaw);
+
+  const email = pick(e, ["email", "Email", "Email Address", "E-mail", "x6"]);
+  const phone = pick(e, [
+    "phone",
+    "Phone",
+    "Phone Number",
+    "Mobile",
+    "Cell",
+    "x9",
+  ]);
+
+  const ministry = pick(e, [
+    "ministry",
+    "ministry_to_remove",
+    "removed_ministry",
+    "RemovedMinistry",
+    "Removed Ministry",
+    "MinistryRemoved",
+    "Ministry Removed",
+    "MinistryToRemove",
+    "Ministry to Remove",
+    "ApprovedMinistry", // if you reuse same dropdown label
+    "x8",
+  ]);
+
+  return { email, phone, ministry };
+}
+
+/**
+ * Update form (recommended JSON names):
+ *   email OR phone  (identifier)
+ *   first_name / last_name / email / phone (any to update)
+ *   ministry (optional) -> ensures user is attached to that ministry
+ *
+ * Optional advanced:
+ *   previous_ministry -> remove previous and add new
+ */
+function mapUpdate(bodyRaw) {
+  const e = unwrapBody(bodyRaw);
+
+  const first_name = pick(e, ["first_name", "Firstname", "FirstName", "x3"]);
+  const last_name = pick(e, ["last_name", "LastName", "Lastname", "x5"]);
+
+  // identifier fields
+  const email = pick(e, ["email", "Email", "x6"]);
+  const phone = pick(e, ["phone", "Phone", "x9"]);
+
+  // update ministry (optional)
+  const ministry = pick(e, ["ministry", "ApprovedMinistry", "Ministry", "x8"]);
+  const previous_ministry = pick(e, [
+    "previous_ministry",
+    "old_ministry",
+    "prior_ministry",
+    "PreviousMinistry",
+  ]);
+
+  return { first_name, last_name, email, phone, ministry, previous_ministry };
+}
+
+/* ------------------------- Better Debug Logs ------------------------- */
+function requestMeta(req) {
+  return {
+    at: nowIso(),
+    path: req.originalUrl,
+    method: req.method,
+    secret_source: req._cognitoSecretSource || null,
+    ip: (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "")
+      .toString()
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(", "),
+    content_type: req.headers["content-type"] || null,
+  };
+}
+
+function bodyKeySummary(raw) {
+  const top = raw && typeof raw === "object" ? Object.keys(raw) : [];
+  const unwrapped = unwrapBody(raw);
+  const inner =
+    unwrapped && typeof unwrapped === "object" ? Object.keys(unwrapped) : [];
+  return {
+    body_top_keys: top.slice(0, 25),
+    unwrapped_keys: inner.slice(0, 25),
+  };
+}
+
+/* ------------------------- Routes ------------------------- */
+
+// (Optional) quick check in browser
+router.get("/cognito/ping", (req, res) => {
+  res.json({ ok: true, at: nowIso() });
+});
+
+/**
+ * ADD
+ * POST /api/integrations/cognito/volunteer-ministry/add?secret=...
+ */
+router.post(
+  "/cognito/volunteer-ministry/add",
+  verifyWebhookSecret,
+  async (req, res) => {
+    const meta = requestMeta(req);
+
+    try {
+      logHit("ADD HIT", { ...meta, ...bodyKeySummary(req.body) });
+
+      const payload = mapAddition(req.body);
+      logHit("ADD payload", payload);
+
+      if (!payload.ministry) {
+        return res.status(400).json({ ok: false, message: "Missing ministry" });
+      }
+      if (!payload.email && !payload.phone) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing identifier (email or phone)",
+        });
+      }
+
+      // 1) find or create user
+      let user = await findUser({ email: payload.email, phone: payload.phone });
+      let userAction = "found";
+
+      if (!user) {
+        if (!payload.first_name || !payload.last_name) {
+          return res.status(400).json({
+            ok: false,
+            message:
+              "User not found; first_name and last_name are required to create a new user.",
+          });
+        }
+        user = await createUser(payload);
+        userAction = "created";
+      }
+
+      // 2) ensure ministry exists
+      const ministry = await ensureMinistryByName(payload.ministry);
+
+      // 3) attach
+      await addUserToMinistry(user.id, ministry.id);
+
+      logHit("ADD done", {
+        userAction,
+        user_id: user.id,
+        ministry_id: ministry.id,
+        ministry_name: ministry.name,
+      });
+
+      return res.json({
+        ok: true,
+        action: "added",
+        user_action: userAction,
+        user_id: user.id,
+        ministry_id: ministry.id,
+        ministry_name: ministry.name,
+      });
+    } catch (err) {
+      console.error(`${LOG_PREFIX} ADD error:`, err);
+      return res.status(500).json({ ok: false, message: "Webhook failed" });
+    }
+  }
+);
+
+/**
+ * REMOVE
+ * POST /api/integrations/cognito/volunteer-ministry/remove?secret=...
+ */
+router.post(
+  "/cognito/volunteer-ministry/remove",
+  verifyWebhookSecret,
+  async (req, res) => {
+    const meta = requestMeta(req);
+
+    try {
+      logHit("REMOVE HIT", { ...meta, ...bodyKeySummary(req.body) });
+
+      const payload = mapRemoval(req.body);
+      logHit("REMOVE payload", payload);
+
+      if (!payload.ministry) {
+        return res.status(400).json({ ok: false, message: "Missing ministry" });
+      }
+      if (!payload.email && !payload.phone) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing identifier (email or phone)",
+        });
+      }
+
+      const user = await findUser({
+        email: payload.email,
+        phone: payload.phone,
+      });
+      if (!user) {
+        logHit("REMOVE noop", { reason: "user not found" });
+        return res.json({
+          ok: true,
+          action: "noop",
+          message: "User not found",
+        });
+      }
+
+      const ministry = await ensureMinistryByName(payload.ministry);
+      await removeUserFromMinistry(user.id, ministry.id);
+
+      logHit("REMOVE done", {
+        user_id: user.id,
+        ministry_id: ministry.id,
+        ministry_name: ministry.name,
+      });
+
+      return res.json({
+        ok: true,
+        action: "removed",
+        user_id: user.id,
+        ministry_id: ministry.id,
+        ministry_name: ministry.name,
+      });
+    } catch (err) {
+      console.error(`${LOG_PREFIX} REMOVE error:`, err);
+      return res.status(500).json({ ok: false, message: "Webhook failed" });
+    }
+  }
+);
+
+/**
+ * UPDATE
+ * POST /api/integrations/cognito/volunteer-ministry/update?secret=...
+ *
+ * Behavior:
+ * - Finds user by email or phone (required)
+ * - Updates any provided user fields (first_name, last_name, email, phone)
+ * - If ministry is provided, ensures ministry + attaches user to it
+ * - If previous_ministry AND ministry are provided, removes previous_ministry then adds ministry
+ */
+router.post(
+  "/cognito/volunteer-ministry/update",
+  verifyWebhookSecret,
+  async (req, res) => {
+    const meta = requestMeta(req);
+
+    try {
+      logHit("UPDATE HIT", { ...meta, ...bodyKeySummary(req.body) });
+
+      const payload = mapUpdate(req.body);
+      logHit("UPDATE payload", payload);
+
+      if (!payload.email && !payload.phone) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing identifier (email or phone)",
+        });
+      }
+
+      const user = await findUser({
+        email: payload.email,
+        phone: payload.phone,
+      });
+      if (!user) {
+        logHit("UPDATE noop", { reason: "user not found" });
+        return res.json({
+          ok: true,
+          action: "noop",
+          message: "User not found",
+        });
+      }
+
+      // Update user fields (only what is provided)
+      const updatedUser = await updateUser(user.id, payload);
+
+      let ministryAction = null;
+      let previousRemoved = null;
+      let ministryRow = null;
+
+      if (payload.ministry) {
+        // optional: remove previous first
+        if (
+          payload.previous_ministry &&
+          payload.previous_ministry !== payload.ministry
+        ) {
+          const prev = await ensureMinistryByName(payload.previous_ministry);
+          await removeUserFromMinistry(user.id, prev.id);
+          previousRemoved = { ministry_id: prev.id, ministry_name: prev.name };
+        }
+
+        ministryRow = await ensureMinistryByName(payload.ministry);
+        await addUserToMinistry(user.id, ministryRow.id);
+        ministryAction = "ensured_and_attached";
+      }
+
+      logHit("UPDATE done", {
+        user_id: user.id,
+        updated_email: updatedUser?.email || null,
+        previousRemoved,
+        ministryAction,
+        ministry: ministryRow
+          ? { id: ministryRow.id, name: ministryRow.name }
+          : null,
+      });
+
+      return res.json({
+        ok: true,
+        action: "updated",
+        user_id: user.id,
+        updated_user: updatedUser,
+        previous_removed: previousRemoved,
+        ministry_action: ministryAction,
+        ministry: ministryRow
+          ? { id: ministryRow.id, name: ministryRow.name }
+          : null,
+      });
+    } catch (err) {
+      console.error(`${LOG_PREFIX} UPDATE error:`, err);
+      return res.status(500).json({ ok: false, message: "Webhook failed" });
+    }
+  }
+);
+
+module.exports = router;

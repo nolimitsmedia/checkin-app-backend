@@ -74,7 +74,6 @@ function verifyWebhookSecret(req, res, next) {
       .json({ ok: false, message: "Invalid webhook secret" });
   }
 
-  // store for logging downstream
   req._cognitoSecretSource = secretSource;
   next();
 }
@@ -98,10 +97,12 @@ function pick(obj, keys) {
 /**
  * Cognito can send:
  *  - { entry: { ... } }
+ *  - { entries: [ { ... } ] }
  *  - or sometimes fields at top-level
  */
 function unwrapBody(body) {
   if (!body) return {};
+  if (Array.isArray(body.entries) && body.entries[0]) return body.entries[0];
   return body.entry || body.data || body.fields || body;
 }
 
@@ -282,65 +283,105 @@ function mapHelpsMember(bodyRaw) {
   };
 }
 
-/* ------------------------- Mapping: Helps Change Form (removals) ------------------------- */
+/* ------------------------- Mapping: Helps Ministry - Change Form (new duplicated form) ------------------------- */
 /**
- * Change Form payload shape (you pasted):
- * { entries: [ { x33:{First,Last}, x34, x35, x5[], x26, x11, x36, x37, x31, x38, Form, Id } ] }
+ * Your *current* webhook payload for the duplicated Change Form is using friendly JSON names,
+ * not the older x## keys.
+ *
+ * Based on your logs, we should map from:
+ * - Name2: { First, Last }
+ * - email
+ * - phone
+ * - PleaseCheckTheFollowingMinistryChangesThatApply: [ ... ]
+ * - PleaseSelectTheRequestedMembershipChange: "Member to be removed" (etc)
+ * - MinistriesInWhichMemberIsServing (or MinistryName)
+ * - ministries_inactive (optional)
+ * - reason_for_inactivity (optional)
+ * - effective_date_removal / EffectiveDateOfRemoval (date)
  */
-function unwrapCognitoEntry(body) {
-  if (!body) return {};
-  if (Array.isArray(body.entries) && body.entries[0]) return body.entries[0];
-  return body.entry || body.data || body.fields || body;
-}
-
 function mapHelpsChangeForm(bodyRaw) {
-  const e = unwrapCognitoEntry(bodyRaw);
+  const e = unwrapBody(bodyRaw);
 
-  const memberNameObj = e?.x33 && typeof e.x33 === "object" ? e.x33 : null;
+  // Member info (Name2)
+  const nameObj =
+    e &&
+    (e.Name2 || e.MemberInformationName || e.Name) &&
+    typeof (e.Name2 || e.MemberInformationName || e.Name) === "object"
+      ? e.Name2 || e.MemberInformationName || e.Name
+      : null;
 
-  const first_name = memberNameObj?.First
-    ? String(memberNameObj.First).trim()
-    : null;
-  const last_name = memberNameObj?.Last
-    ? String(memberNameObj.Last).trim()
-    : null;
+  const first_name = nameObj ? pick(nameObj, ["First"]) : null;
+  const last_name = nameObj ? pick(nameObj, ["Last"]) : null;
 
-  const email = e?.x34 ? String(e.x34).trim() : null;
-  const phone = e?.x35 ? String(e.x35).trim() : null;
+  const email = pick(e, ["email", "Email"]);
+  const phone = pick(e, ["phone", "Phone"]);
 
-  const change_types = Array.isArray(e?.x5) ? e.x5.map(String) : [];
-  const membership_action = e?.x26 ? String(e.x26).trim() : null;
+  // Change type checkbox list
+  const change_types_raw =
+    pick(e, ["PleaseCheckTheFollowingMinistryChangesThatApply"]) ||
+    pick(e, ["Please Check The Following Ministry Changes That Apply"]);
 
-  const ministry_serving = e?.x36 ? String(e.x36).trim() : null;
-  const ministry_name = e?.x11 ? String(e.x11).trim() : null;
-  const ministry_inactive = e?.x37 ? String(e.x37).trim() : null;
+  const change_types = Array.isArray(change_types_raw)
+    ? change_types_raw.map((x) => String(x))
+    : change_types_raw
+      ? [String(change_types_raw)]
+      : [];
+
+  // Membership action dropdown
+  const membership_action = pick(e, [
+    "PleaseSelectTheRequestedMembershipChange",
+    "Please Select The Requested Membership Change",
+  ]);
+
+  // Ministry target (what we should remove the member from)
+  const ministry_serving = pick(e, [
+    "MinistriesInWhichMemberIsServing",
+    "Ministries In Which Member Is Serving",
+  ]);
+
+  const ministry_name = pick(e, ["MinistryName", "Ministry Name"]);
+  const ministry_inactive = pick(e, [
+    "ministries_inactive",
+    "MinistriesInWhichMemberIsInactive",
+  ]);
 
   const ministry_target =
-    ministry_serving || ministry_name || ministry_inactive || null;
+    (ministry_serving && String(ministry_serving).trim()) ||
+    (ministry_name && String(ministry_name).trim()) ||
+    (ministry_inactive && String(ministry_inactive).trim()) ||
+    null;
 
-  const effective_date_raw = e?.x31 ? String(e.x31).trim() : null;
-  const reason = e?.x38 ? String(e.x38).trim() : null;
+  const effective_date_raw = pick(e, [
+    "effective_date_removal",
+    "EffectiveDateOfRemoval",
+    "Effective Date Of Removal",
+  ]);
 
-  const form = e?.Form && typeof e.Form === "object" ? e.Form : null;
-  const form_id = form?.Id ? String(form.Id) : null;
-  const form_internal = form?.InternalName ? String(form.InternalName) : null;
+  const reason = pick(e, ["reason_for_inactivity", "ReasonForInactivity"]);
+
+  const form = e.Form && typeof e.Form === "object" ? e.Form : null;
+  const form_id = form ? pick(form, ["Id"]) : null;
+  const form_internal = form ? pick(form, ["InternalName"]) : null;
+
+  const entry_id = pick(e, ["Id"]);
 
   return {
-    first_name,
-    last_name,
-    email,
-    phone,
+    first_name: first_name ? String(first_name).trim() : null,
+    last_name: last_name ? String(last_name).trim() : null,
+    email: email ? String(email).trim() : null,
+    phone: phone ? String(phone).trim() : null,
     change_types,
-    membership_action,
+    membership_action: membership_action
+      ? String(membership_action).trim()
+      : null,
     ministry_target,
-    ministry_serving,
-    ministry_name,
-    ministry_inactive,
-    effective_date_raw,
-    reason,
+    effective_date_raw: effective_date_raw
+      ? String(effective_date_raw).trim()
+      : null,
+    reason: reason ? String(reason).trim() : null,
     form_id,
     form_internal,
-    entry_id: e?.Id ? String(e.Id) : null,
+    entry_id: entry_id ? String(entry_id) : null,
   };
 }
 
@@ -471,10 +512,9 @@ router.post(
         return res.status(400).json({ ok: false, message: "Missing ministry" });
       }
       if (!payload.email && !payload.phone) {
-        return res.status(400).json({
-          ok: false,
-          message: "Missing identifier (email or phone)",
-        });
+        return res
+          .status(400)
+          .json({ ok: false, message: "Missing identifier (email or phone)" });
       }
 
       const user = await findUser({
@@ -602,7 +642,7 @@ router.post(
   },
 );
 
-// POST /api/integrations/cognito/helps-member/delete  (safe noop)
+// POST /api/integrations/cognito/helps-member/delete (safe noop)
 router.post(
   "/cognito/helps-member/delete",
   verifyWebhookSecret,
@@ -639,19 +679,13 @@ router.post(
   },
 );
 
-/* ------------------------- Routes: Helps Member Change (your current Delete Entry Endpoint URL) ------------------------- */
+/* ------------------------- Routes: Helps Member Change (your endpoint) ------------------------- */
 /**
- * You said you are using:
+ * You are using:
  *   /api/integrations/cognito/helps-member/change?secret=...
  *
- * This endpoint is designed for the “Helps Ministry - Change Form” payload.
- * It will ONLY remove a ministry when it is clearly a membership removal request.
- *
- * Safe behavior:
- * - does NOT delete users
- * - does NOT remove ministries unless:
- *     x5 contains "Membership ..."
- *     AND x26 indicates member removal
+ * This endpoint reads the *new duplicated Change Form* keys (Name2/email/phone/etc).
+ * It will only remove a ministry when it's clearly a membership removal request.
  */
 router.post(
   "/cognito/helps-member/change",
@@ -666,7 +700,7 @@ router.post(
         ip: ipChain(req),
         secretSource: req._cognitoSecretSource,
         body_top_keys: topKeys(req.body),
-        unwrapped_keys: topKeys(unwrapCognitoEntry(req.body)),
+        unwrapped_keys: topKeys(unwrapBody(req.body)),
       });
 
       const payload = mapHelpsChangeForm(req.body);
@@ -708,7 +742,8 @@ router.post(
       if (!payload.ministry_target) {
         return res.status(400).json({
           ok: false,
-          message: "Missing target ministry for removal",
+          message:
+            "Missing target ministry for removal (expected MinistriesInWhichMemberIsServing or MinistryName).",
         });
       }
 
@@ -772,12 +807,5 @@ router.post(
     }
   },
 );
-
-/* ------------------------- Removal Form Mapping Template (optional future) ------------------------- */
-/**
- * If you later build a dedicated “Helps Ministry Removal” form, we can add:
- *   POST /api/integrations/cognito/helps-member/remove
- * with a clean snake_case mapping (email/phone/ministry).
- */
 
 module.exports = router;

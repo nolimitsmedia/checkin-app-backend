@@ -99,8 +99,6 @@ function pick(obj, keys) {
  * Cognito can send:
  *  - { entry: { ... } }
  *  - or sometimes fields at top-level
- * Your latest working payload shows top-level fields (Form, first_name, etc.)
- * so we support both.
  */
 function unwrapBody(body) {
   if (!body) return {};
@@ -117,6 +115,7 @@ function parseYesNo(v) {
   return null;
 }
 
+/* ------------------------- DB helpers ------------------------- */
 async function findUser({ email, phone }) {
   const emailNorm = email ? String(email).trim().toLowerCase() : null;
   const phoneDigits = digitsOnly(phone);
@@ -217,7 +216,6 @@ function mapVolunteerRemoval(bodyRaw) {
   const email = pick(e, ["email", "Email", "Email Address", "E-mail"]);
   const phone = pick(e, ["phone", "Phone", "Phone Number", "Mobile", "Cell"]);
 
-  // Template – update based on your removal form payload later
   const ministry = pick(e, [
     "ministry",
     "ministry_name",
@@ -232,40 +230,20 @@ function mapVolunteerRemoval(bodyRaw) {
   return { email, phone, ministry };
 }
 
-/* ------------------------- Mapping: Helps Member (Form ID 202) ------------------------- */
-/**
- * Your test payload contains BOTH:
- *   Name: { First, Last, ... }
- *   FirstName / LastName (we created these hidden fields)
- *
- * We will prefer snake_case hidden fields if present:
- *   first_name, last_name
- *
- * IMPORTANT: In Cognito, make sure your hidden fields JSON Names are:
- *   first_name
- *   last_name
- *
- * Ministry field in your payload:
- *   MinistryApprovedFor
- *
- * New/Existing flag field:
- *   IsIndividualNewToHelpsMinistry  -> "Yes"/"No"
- */
+/* ------------------------- Mapping: Helps Member (Newly Approved) ------------------------- */
 function mapHelpsMember(bodyRaw) {
   const e = unwrapBody(bodyRaw);
 
-  // Prefer your DB-safe snake_case fields (hidden)
   const first_name =
     pick(e, ["first_name"]) ||
     pick(e, ["FirstName"]) ||
-    pick(e, ["Name.First", "NameFirst"]); // fallback patterns (rare)
+    pick(e, ["Name.First", "NameFirst"]);
 
   const last_name =
     pick(e, ["last_name"]) ||
     pick(e, ["LastName"]) ||
     pick(e, ["Name.Last", "NameLast"]);
 
-  // If Name object exists, use it as final fallback
   const nameObj = e && e.Name && typeof e.Name === "object" ? e.Name : null;
   const firstFromName =
     !first_name && nameObj ? pick(nameObj, ["First"]) : null;
@@ -287,7 +265,6 @@ function mapHelpsMember(bodyRaw) {
 
   const is_new = parseYesNo(is_new_raw);
 
-  // Form metadata
   const form = e.Form && typeof e.Form === "object" ? e.Form : null;
   const form_id = form ? pick(form, ["Id"]) : null;
   const form_internal = form ? pick(form, ["InternalName"]) : null;
@@ -303,6 +280,81 @@ function mapHelpsMember(bodyRaw) {
     form_internal,
     raw_is_new: is_new_raw ? String(is_new_raw) : null,
   };
+}
+
+/* ------------------------- Mapping: Helps Change Form (removals) ------------------------- */
+/**
+ * Change Form payload shape (you pasted):
+ * { entries: [ { x33:{First,Last}, x34, x35, x5[], x26, x11, x36, x37, x31, x38, Form, Id } ] }
+ */
+function unwrapCognitoEntry(body) {
+  if (!body) return {};
+  if (Array.isArray(body.entries) && body.entries[0]) return body.entries[0];
+  return body.entry || body.data || body.fields || body;
+}
+
+function mapHelpsChangeForm(bodyRaw) {
+  const e = unwrapCognitoEntry(bodyRaw);
+
+  const memberNameObj = e?.x33 && typeof e.x33 === "object" ? e.x33 : null;
+
+  const first_name = memberNameObj?.First
+    ? String(memberNameObj.First).trim()
+    : null;
+  const last_name = memberNameObj?.Last
+    ? String(memberNameObj.Last).trim()
+    : null;
+
+  const email = e?.x34 ? String(e.x34).trim() : null;
+  const phone = e?.x35 ? String(e.x35).trim() : null;
+
+  const change_types = Array.isArray(e?.x5) ? e.x5.map(String) : [];
+  const membership_action = e?.x26 ? String(e.x26).trim() : null;
+
+  const ministry_serving = e?.x36 ? String(e.x36).trim() : null;
+  const ministry_name = e?.x11 ? String(e.x11).trim() : null;
+  const ministry_inactive = e?.x37 ? String(e.x37).trim() : null;
+
+  const ministry_target =
+    ministry_serving || ministry_name || ministry_inactive || null;
+
+  const effective_date_raw = e?.x31 ? String(e.x31).trim() : null;
+  const reason = e?.x38 ? String(e.x38).trim() : null;
+
+  const form = e?.Form && typeof e.Form === "object" ? e.Form : null;
+  const form_id = form?.Id ? String(form.Id) : null;
+  const form_internal = form?.InternalName ? String(form.InternalName) : null;
+
+  return {
+    first_name,
+    last_name,
+    email,
+    phone,
+    change_types,
+    membership_action,
+    ministry_target,
+    ministry_serving,
+    ministry_name,
+    ministry_inactive,
+    effective_date_raw,
+    reason,
+    form_id,
+    form_internal,
+    entry_id: e?.Id ? String(e.Id) : null,
+  };
+}
+
+function includesMembershipRemove(change_types, membership_action) {
+  const types = (change_types || []).map((s) => String(s).toLowerCase());
+  const action = String(membership_action || "").toLowerCase();
+
+  const pickedMembership = types.some((t) => t.includes("membership"));
+  const removeAction =
+    action.includes("removed") ||
+    action.includes("remove") ||
+    action.includes("member to be removed");
+
+  return pickedMembership && removeAction;
 }
 
 /* ------------------------- Core handler (shared) ------------------------- */
@@ -325,10 +377,8 @@ async function handleAddOrAttach({
     };
   }
 
-  // 1) find user
   let user = await findUser({ email, phone });
 
-  // 2) create if allowed
   if (!user) {
     if (!allowCreate) {
       return {
@@ -348,7 +398,6 @@ async function handleAddOrAttach({
     user = await createUser({ first_name, last_name, email, phone });
   }
 
-  // 3) ensure ministry + attach
   const ministry = await ensureMinistryByName(ministryName);
   await addUserToMinistry(user.id, ministry.id);
 
@@ -358,7 +407,6 @@ async function handleAddOrAttach({
     user_id: user.id,
     ministry_id: ministry.id,
     ministry_name: ministry.name,
-    created_user: !user ? false : undefined, // (kept minimal)
   };
 }
 
@@ -381,7 +429,6 @@ router.post(
       });
 
       const payload = mapVolunteerAddition(req.body);
-
       console.log("[Cognito ADD legacy] payload", payload);
 
       const result = await handleAddOrAttach({
@@ -459,15 +506,9 @@ router.post(
   },
 );
 
-/* ------------------------- Routes: Helps Member (NEW Form) ------------------------- */
-/**
- * MAIN:
- * POST /api/integrations/cognito/helps-member/submit
- *
- * Behavior:
- *  - If IsIndividualNewToHelpsMinistry == Yes  -> create if missing + attach ministry
- *  - If == No -> MUST find existing user, then attach ministry (no create)
- */
+/* ------------------------- Routes: Helps Member (Newly Approved) ------------------------- */
+
+// POST /api/integrations/cognito/helps-member/submit
 router.post(
   "/cognito/helps-member/submit",
   verifyWebhookSecret,
@@ -484,11 +525,8 @@ router.post(
       });
 
       const payload = mapHelpsMember(req.body);
-
       console.log("[Cognito HELPS SUBMIT] mapped payload", payload);
 
-      // Decide create-vs-lookup based on the form field
-      // If blank/unrecognized, default to "No create" for safety
       const allowCreate = payload.is_new === true;
 
       const result = await handleAddOrAttach({
@@ -500,7 +538,6 @@ router.post(
         allowCreate,
       });
 
-      // Add extra debug context to the response so you can see behavior quickly
       return res.status(result.status || 200).json({
         ...result,
         debug: {
@@ -518,14 +555,7 @@ router.post(
   },
 );
 
-/**
- * OPTIONAL: Update Entry Endpoint
- * Cognito will post JSON when an entry is updated.
- * We typically re-run the same attach logic:
- *  - If they changed ministry, it will attach the new ministry
- *  - If they changed name/email/phone, it will NOT update user record here
- *    (keep this integration safe; we can add user-update logic later if you want)
- */
+// POST /api/integrations/cognito/helps-member/update
 router.post(
   "/cognito/helps-member/update",
   verifyWebhookSecret,
@@ -544,7 +574,6 @@ router.post(
       const payload = mapHelpsMember(req.body);
       console.log("[Cognito HELPS UPDATE] mapped payload", payload);
 
-      // Update should never create silently unless explicitly flagged "Yes"
       const allowCreate = payload.is_new === true;
 
       const result = await handleAddOrAttach({
@@ -573,14 +602,7 @@ router.post(
   },
 );
 
-/**
- * OPTIONAL: Delete Entry Endpoint
- * If the form entry is deleted, we typically do NOT delete users/ministry links
- * (that can remove real ministry assignments unintentionally).
- *
- * This endpoint is mainly for audit/logging. If you want “delete entry -> remove ministry”
- * we can implement it, but I recommend a dedicated Removal form instead.
- */
+// POST /api/integrations/cognito/helps-member/delete  (safe noop)
 router.post(
   "/cognito/helps-member/delete",
   verifyWebhookSecret,
@@ -617,22 +639,145 @@ router.post(
   },
 );
 
-/* ------------------------- Removal Form Mapping Template ------------------------- */
+/* ------------------------- Routes: Helps Member Change (your current Delete Entry Endpoint URL) ------------------------- */
 /**
- * ✅ Use this template when you build a “Helps Ministry Removal” Cognito form.
+ * You said you are using:
+ *   /api/integrations/cognito/helps-member/change?secret=...
  *
- * Recommended fields (with JSON Names):
- *  - email  (JSON: email)
- *  - phone  (JSON: phone)   // optional but useful
- *  - ministry_to_remove (JSON: ministry) or MinistryToRemove (pick one)
+ * This endpoint is designed for the “Helps Ministry - Change Form” payload.
+ * It will ONLY remove a ministry when it is clearly a membership removal request.
  *
- * Then point the form Submit Endpoint to:
- *   /api/integrations/cognito/helps-member/remove?secret=YOUR_SECRET
- *
- * After you submit ONE test entry, paste the payload here and we’ll lock mapping keys.
+ * Safe behavior:
+ * - does NOT delete users
+ * - does NOT remove ministries unless:
+ *     x5 contains "Membership ..."
+ *     AND x26 indicates member removal
  */
-// router.post("/cognito/helps-member/remove", verifyWebhookSecret, async (req, res) => {
-//   // TODO: implement like legacy remove but with your final field keys
-// });
+router.post(
+  "/cognito/helps-member/change",
+  verifyWebhookSecret,
+  async (req, res) => {
+    const endpoint = `${req.method} ${req.originalUrl}`;
+
+    try {
+      console.log("[Cognito HELPS CHANGE] HIT", {
+        at: nowIso(),
+        endpoint,
+        ip: ipChain(req),
+        secretSource: req._cognitoSecretSource,
+        body_top_keys: topKeys(req.body),
+        unwrapped_keys: topKeys(unwrapCognitoEntry(req.body)),
+      });
+
+      const payload = mapHelpsChangeForm(req.body);
+
+      console.log("[Cognito HELPS CHANGE] mapped payload", {
+        first_name: payload.first_name,
+        last_name: payload.last_name,
+        email: payload.email,
+        phone: payload.phone,
+        ministry_target: payload.ministry_target,
+        change_types: payload.change_types,
+        membership_action: payload.membership_action,
+        effective_date_raw: payload.effective_date_raw,
+        reason: payload.reason,
+        form_id: payload.form_id,
+        form_internal: payload.form_internal,
+        entry_id: payload.entry_id,
+      });
+
+      const shouldRemove = includesMembershipRemove(
+        payload.change_types,
+        payload.membership_action,
+      );
+
+      if (!shouldRemove) {
+        return res.json({
+          ok: true,
+          action: "noop",
+          message:
+            "Change endpoint received, but no supported membership removal action detected (safe default).",
+          debug: {
+            secretSource: req._cognitoSecretSource,
+            form_id: payload.form_id,
+            entry_id: payload.entry_id,
+          },
+        });
+      }
+
+      if (!payload.ministry_target) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing target ministry for removal",
+        });
+      }
+
+      if (!payload.email && !payload.phone) {
+        return res.status(400).json({
+          ok: false,
+          message: "Missing identifier (email or phone)",
+        });
+      }
+
+      const user = await findUser({
+        email: payload.email,
+        phone: payload.phone,
+      });
+
+      if (!user) {
+        return res.status(404).json({
+          ok: false,
+          message:
+            "User not found — cannot remove ministry (check email/phone matches existing record).",
+          debug: {
+            email: payload.email,
+            phone_last4: digitsOnly(payload.phone).slice(-4),
+            ministry_target: payload.ministry_target,
+          },
+        });
+      }
+
+      const ministry = await ensureMinistryByName(payload.ministry_target);
+      await removeUserFromMinistry(user.id, ministry.id);
+
+      console.log("[Cognito HELPS CHANGE] RESULT", {
+        at: nowIso(),
+        endpoint,
+        action: "removed",
+        user_id: user.id,
+        ministry_id: ministry.id,
+        ministry_name: ministry.name,
+        effective_date_raw: payload.effective_date_raw,
+      });
+
+      return res.json({
+        ok: true,
+        action: "removed",
+        user_id: user.id,
+        ministry_id: ministry.id,
+        ministry_name: ministry.name,
+        debug: {
+          effective_date_raw: payload.effective_date_raw,
+          reason: payload.reason,
+          change_types: payload.change_types,
+          membership_action: payload.membership_action,
+          form_id: payload.form_id,
+          entry_id: payload.entry_id,
+          secretSource: req._cognitoSecretSource,
+        },
+      });
+    } catch (err) {
+      console.error("Cognito HELPS change error:", err);
+      return res.status(500).json({ ok: false, message: "Webhook failed" });
+    }
+  },
+);
+
+/* ------------------------- Removal Form Mapping Template (optional future) ------------------------- */
+/**
+ * If you later build a dedicated “Helps Ministry Removal” form, we can add:
+ *   POST /api/integrations/cognito/helps-member/remove
+ * with a clean snake_case mapping (email/phone/ministry).
+ */
 
 module.exports = router;

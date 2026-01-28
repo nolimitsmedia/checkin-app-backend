@@ -97,13 +97,15 @@ function pick(obj, keys) {
 /**
  * Cognito can send:
  *  - { entry: { ... } }
- *  - { entries: [ { ... } ] }
  *  - or sometimes fields at top-level
+ *  - or { entries: [ { ... } ] } (batch/entries format)
  */
 function unwrapBody(body) {
   if (!body) return {};
-  if (Array.isArray(body.entries) && body.entries[0]) return body.entries[0];
-  return body.entry || body.data || body.fields || body;
+  const root = body.entry || body.data || body.fields || body;
+  if (root && Array.isArray(root.entries) && root.entries[0])
+    return root.entries[0];
+  return root;
 }
 
 function parseYesNo(v) {
@@ -116,7 +118,27 @@ function parseYesNo(v) {
   return null;
 }
 
-/* ------------------------- DB helpers ------------------------- */
+function normalizeArray(v) {
+  if (v == null) return [];
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string" && v.trim()) return [v.trim()];
+  return [];
+}
+
+function parseMinistryList(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) {
+    return v.map((s) => String(s || "").trim()).filter(Boolean);
+  }
+  const s = String(v || "").trim();
+  if (!s) return [];
+  // split on new lines, commas, semicolons
+  return s
+    .split(/\r?\n|,|;/g)
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+}
+
 async function findUser({ email, phone }) {
   const emailNorm = email ? String(email).trim().toLowerCase() : null;
   const phoneDigits = digitsOnly(phone);
@@ -181,6 +203,24 @@ async function ensureMinistryByName(name) {
   return r.rows[0];
 }
 
+/**
+ * ✅ Recommended for removal flows:
+ * DO NOT create ministries. Only remove if the ministry already exists.
+ */
+async function findMinistryByName(name) {
+  const n = String(name || "").trim();
+  if (!n) return null;
+
+  const r = await db.query(
+    `SELECT id, name, COALESCE(is_active, true) AS is_active
+     FROM ministries
+     WHERE LOWER(name) = LOWER($1)
+     LIMIT 1`,
+    [n],
+  );
+  return r.rows[0] || null;
+}
+
 async function addUserToMinistry(user_id, ministry_id) {
   await db.query(
     `INSERT INTO user_ministries (user_id, ministry_id)
@@ -231,7 +271,7 @@ function mapVolunteerRemoval(bodyRaw) {
   return { email, phone, ministry };
 }
 
-/* ------------------------- Mapping: Helps Member (Newly Approved) ------------------------- */
+/* ------------------------- Mapping: Helps Member (Submit/Update form) ------------------------- */
 function mapHelpsMember(bodyRaw) {
   const e = unwrapBody(bodyRaw);
 
@@ -273,7 +313,7 @@ function mapHelpsMember(bodyRaw) {
   return {
     first_name: first_name || firstFromName || null,
     last_name: last_name || lastFromName || null,
-    email: email ? String(email).trim() : null,
+    email: email ? String(email).trim().toLowerCase() : null,
     phone: phone ? String(phone).trim() : null,
     ministry: ministry ? String(ministry).trim() : null,
     is_new,
@@ -283,119 +323,89 @@ function mapHelpsMember(bodyRaw) {
   };
 }
 
-/* ------------------------- Mapping: Helps Ministry - Change Form (new duplicated form) ------------------------- */
-/**
- * Your *current* webhook payload for the duplicated Change Form is using friendly JSON names,
- * not the older x## keys.
- *
- * Based on your logs, we should map from:
- * - Name2: { First, Last }
- * - email
- * - phone
- * - PleaseCheckTheFollowingMinistryChangesThatApply: [ ... ]
- * - PleaseSelectTheRequestedMembershipChange: "Member to be removed" (etc)
- * - MinistriesInWhichMemberIsServing (or MinistryName)
- * - ministries_inactive (optional)
- * - reason_for_inactivity (optional)
- * - effective_date_removal / EffectiveDateOfRemoval (date)
- */
-function mapHelpsChangeForm(bodyRaw) {
+/* ------------------------- Mapping: Helps Change Form (Membership Removal) ------------------------- */
+function mapHelpsChange(bodyRaw) {
   const e = unwrapBody(bodyRaw);
 
-  // Member info (Name2)
-  const nameObj =
-    e &&
-    (e.Name2 || e.MemberInformationName || e.Name) &&
-    typeof (e.Name2 || e.MemberInformationName || e.Name) === "object"
-      ? e.Name2 || e.MemberInformationName || e.Name
-      : null;
+  // Member name (the person being removed)
+  const memberObj =
+    (e.member_name && typeof e.member_name === "object" && e.member_name) ||
+    (e.MemberName && typeof e.MemberName === "object" && e.MemberName) ||
+    null;
 
-  const first_name = nameObj ? pick(nameObj, ["First"]) : null;
-  const last_name = nameObj ? pick(nameObj, ["Last"]) : null;
+  const member_first_name = memberObj ? pick(memberObj, ["First"]) : null;
+  const member_last_name = memberObj ? pick(memberObj, ["Last"]) : null;
+
+  // Requester name (who submitted the change) – optional
+  const requesterObj =
+    (e.Name && typeof e.Name === "object" && e.Name) ||
+    (e.requester_name &&
+      typeof e.requester_name === "object" &&
+      e.requester_name) ||
+    null;
+
+  const requester_first_name = requesterObj
+    ? pick(requesterObj, ["First"])
+    : null;
+  const requester_last_name = requesterObj
+    ? pick(requesterObj, ["Last"])
+    : null;
 
   const email = pick(e, ["email", "Email"]);
   const phone = pick(e, ["phone", "Phone"]);
 
-  // Change type checkbox list
-  const change_types_raw =
-    pick(e, ["PleaseCheckTheFollowingMinistryChangesThatApply"]) ||
-    pick(e, ["Please Check The Following Ministry Changes That Apply"]);
+  // Ministries to remove: in your Render logs this is "ministries_inactive"
+  const ministries_inactive_raw = pick(e, ["ministries_inactive"]);
+  const ministries_to_remove = parseMinistryList(ministries_inactive_raw);
 
-  const change_types = Array.isArray(change_types_raw)
-    ? change_types_raw.map((x) => String(x))
-    : change_types_raw
-      ? [String(change_types_raw)]
-      : [];
+  // Additional context fields
+  const membership_action = pick(e, ["membership_action"]);
+  const reason = pick(e, ["reason_for_inactivity"]);
+  const effective_date =
+    pick(e, ["effective_date_removal2"]) || pick(e, ["effective_date_removal"]);
 
-  // Membership action dropdown
-  const membership_action = pick(e, [
-    "PleaseSelectTheRequestedMembershipChange",
-    "Please Select The Requested Membership Change",
+  const change_types = normalizeArray(pick(e, ["change_types"]));
+
+  const ministry_context = pick(e, ["MinistryName", "ministry_name"]);
+  const requester_role = pick(e, [
+    "AreYouTheElderOrOverseerOfThisMinistry",
+    "requester_role",
   ]);
-
-  // Ministry target (what we should remove the member from)
-  const ministry_serving = pick(e, [
-    "MinistriesInWhichMemberIsServing",
-    "Ministries In Which Member Is Serving",
-  ]);
-
-  const ministry_name = pick(e, ["MinistryName", "Ministry Name"]);
-  const ministry_inactive = pick(e, [
-    "ministries_inactive",
-    "MinistriesInWhichMemberIsInactive",
-  ]);
-
-  const ministry_target =
-    (ministry_serving && String(ministry_serving).trim()) ||
-    (ministry_name && String(ministry_name).trim()) ||
-    (ministry_inactive && String(ministry_inactive).trim()) ||
-    null;
-
-  const effective_date_raw = pick(e, [
-    "effective_date_removal",
-    "EffectiveDateOfRemoval",
-    "Effective Date Of Removal",
-  ]);
-
-  const reason = pick(e, ["reason_for_inactivity", "ReasonForInactivity"]);
+  const approved_by = pick(e, ["ChangeRequestApprovedBy", "approved_by"]);
 
   const form = e.Form && typeof e.Form === "object" ? e.Form : null;
   const form_id = form ? pick(form, ["Id"]) : null;
   const form_internal = form ? pick(form, ["InternalName"]) : null;
 
+  const entry = e.Entry && typeof e.Entry === "object" ? e.Entry : null;
+  const entry_number = entry ? pick(entry, ["Number"]) : null;
+  const entry_status = entry ? pick(entry, ["Status"]) : null;
+
   const entry_id = pick(e, ["Id"]);
 
   return {
-    first_name: first_name ? String(first_name).trim() : null,
-    last_name: last_name ? String(last_name).trim() : null,
-    email: email ? String(email).trim() : null,
+    requester_first_name,
+    requester_last_name,
+    member_first_name,
+    member_last_name,
+    email: email ? String(email).trim().toLowerCase() : null,
     phone: phone ? String(phone).trim() : null,
-    change_types,
+    ministries_to_remove,
     membership_action: membership_action
       ? String(membership_action).trim()
       : null,
-    ministry_target,
-    effective_date_raw: effective_date_raw
-      ? String(effective_date_raw).trim()
-      : null,
+    effective_date_raw: effective_date ? String(effective_date).trim() : null,
     reason: reason ? String(reason).trim() : null,
+    change_types,
+    ministry_context: ministry_context ? String(ministry_context).trim() : null,
+    requester_role: requester_role ? String(requester_role).trim() : null,
+    approved_by: approved_by ? String(approved_by).trim() : null,
     form_id,
     form_internal,
-    entry_id: entry_id ? String(entry_id) : null,
+    entry_id,
+    entry_number,
+    entry_status,
   };
-}
-
-function includesMembershipRemove(change_types, membership_action) {
-  const types = (change_types || []).map((s) => String(s).toLowerCase());
-  const action = String(membership_action || "").toLowerCase();
-
-  const pickedMembership = types.some((t) => t.includes("membership"));
-  const removeAction =
-    action.includes("removed") ||
-    action.includes("remove") ||
-    action.includes("member to be removed");
-
-  return pickedMembership && removeAction;
 }
 
 /* ------------------------- Core handler (shared) ------------------------- */
@@ -512,9 +522,10 @@ router.post(
         return res.status(400).json({ ok: false, message: "Missing ministry" });
       }
       if (!payload.email && !payload.phone) {
-        return res
-          .status(400)
-          .json({ ok: false, message: "Missing identifier (email or phone)" });
+        return res.status(400).json({
+          ok: false,
+          message: "Missing identifier (email or phone)",
+        });
       }
 
       const user = await findUser({
@@ -529,7 +540,17 @@ router.post(
         });
       }
 
-      const ministry = await ensureMinistryByName(payload.ministry);
+      // Removal: do NOT create ministries
+      const ministry = await findMinistryByName(payload.ministry);
+      if (!ministry) {
+        return res.json({
+          ok: true,
+          action: "noop",
+          message: "Ministry not found (no changes made).",
+          ministry_name: payload.ministry,
+        });
+      }
+
       await removeUserFromMinistry(user.id, ministry.id);
 
       return res.json({
@@ -546,7 +567,7 @@ router.post(
   },
 );
 
-/* ------------------------- Routes: Helps Member (Newly Approved) ------------------------- */
+/* ------------------------- Routes: Helps Member (Submit/Update/Delete) ------------------------- */
 
 // POST /api/integrations/cognito/helps-member/submit
 router.post(
@@ -642,7 +663,7 @@ router.post(
   },
 );
 
-// POST /api/integrations/cognito/helps-member/delete (safe noop)
+// POST /api/integrations/cognito/helps-member/delete
 router.post(
   "/cognito/helps-member/delete",
   verifyWebhookSecret,
@@ -679,20 +700,22 @@ router.post(
   },
 );
 
-/* ------------------------- Routes: Helps Member Change (your endpoint) ------------------------- */
+/* ------------------------- Route: Helps Change Form (Membership Removal) ------------------------- */
 /**
- * You are using:
- *   /api/integrations/cognito/helps-member/change?secret=...
+ * POST /api/integrations/cognito/helps-member/change
  *
- * This endpoint reads the *new duplicated Change Form* keys (Name2/email/phone/etc).
- * It will only remove a ministry when it's clearly a membership removal request.
+ * Removal safety:
+ *  - DOES NOT create ministries
+ *  - If a ministry name doesn't exist, it is returned in not_found[]
+ *
+ * Dry run:
+ *  - add &dryRun=1 to avoid deleting rows
  */
 router.post(
   "/cognito/helps-member/change",
   verifyWebhookSecret,
   async (req, res) => {
     const endpoint = `${req.method} ${req.originalUrl}`;
-
     try {
       console.log("[Cognito HELPS CHANGE] HIT", {
         at: nowIso(),
@@ -703,54 +726,26 @@ router.post(
         unwrapped_keys: topKeys(unwrapBody(req.body)),
       });
 
-      const payload = mapHelpsChangeForm(req.body);
-
-      console.log("[Cognito HELPS CHANGE] mapped payload", {
-        first_name: payload.first_name,
-        last_name: payload.last_name,
-        email: payload.email,
-        phone: payload.phone,
-        ministry_target: payload.ministry_target,
-        change_types: payload.change_types,
-        membership_action: payload.membership_action,
-        effective_date_raw: payload.effective_date_raw,
-        reason: payload.reason,
-        form_id: payload.form_id,
-        form_internal: payload.form_internal,
-        entry_id: payload.entry_id,
-      });
-
-      const shouldRemove = includesMembershipRemove(
-        payload.change_types,
-        payload.membership_action,
-      );
-
-      if (!shouldRemove) {
-        return res.json({
-          ok: true,
-          action: "noop",
-          message:
-            "Change endpoint received, but no supported membership removal action detected (safe default).",
-          debug: {
-            secretSource: req._cognitoSecretSource,
-            form_id: payload.form_id,
-            entry_id: payload.entry_id,
-          },
-        });
-      }
-
-      if (!payload.ministry_target) {
-        return res.status(400).json({
-          ok: false,
-          message:
-            "Missing target ministry for removal (expected MinistriesInWhichMemberIsServing or MinistryName).",
-        });
-      }
+      const payload = mapHelpsChange(req.body);
+      console.log("[Cognito HELPS CHANGE] mapped payload", payload);
 
       if (!payload.email && !payload.phone) {
         return res.status(400).json({
           ok: false,
           message: "Missing identifier (email or phone)",
+          debug: { form_id: payload.form_id, entry_id: payload.entry_id },
+        });
+      }
+
+      if (
+        !payload.ministries_to_remove ||
+        payload.ministries_to_remove.length === 0
+      ) {
+        return res.status(400).json({
+          ok: false,
+          message:
+            "Missing ministries_inactive (no ministries provided to remove)",
+          debug: { form_id: payload.form_id, entry_id: payload.entry_id },
         });
       }
 
@@ -758,46 +753,65 @@ router.post(
         email: payload.email,
         phone: payload.phone,
       });
-
       if (!user) {
-        return res.status(404).json({
-          ok: false,
-          message:
-            "User not found — cannot remove ministry (check email/phone matches existing record).",
+        return res.json({
+          ok: true,
+          action: "noop",
+          message: "User not found",
           debug: {
-            email: payload.email,
-            phone_last4: digitsOnly(payload.phone).slice(-4),
-            ministry_target: payload.ministry_target,
+            form_id: payload.form_id,
+            form_internal: payload.form_internal,
+            entry_id: payload.entry_id,
+            secretSource: req._cognitoSecretSource,
           },
         });
       }
 
-      const ministry = await ensureMinistryByName(payload.ministry_target);
-      await removeUserFromMinistry(user.id, ministry.id);
+      const dryRun = String(req.query.dryRun || "").trim() === "1";
+      const removed = [];
+      const not_found = [];
 
-      console.log("[Cognito HELPS CHANGE] RESULT", {
-        at: nowIso(),
-        endpoint,
-        action: "removed",
-        user_id: user.id,
-        ministry_id: ministry.id,
-        ministry_name: ministry.name,
-        effective_date_raw: payload.effective_date_raw,
-      });
+      for (const name of payload.ministries_to_remove) {
+        const ministry = await findMinistryByName(name);
+        if (!ministry) {
+          not_found.push({ ministry_name: name });
+          continue;
+        }
+
+        if (!dryRun) {
+          await removeUserFromMinistry(user.id, ministry.id);
+        }
+
+        removed.push({
+          ministry_id: ministry.id,
+          ministry_name: ministry.name,
+          dryRun,
+        });
+      }
 
       return res.json({
         ok: true,
-        action: "removed",
+        action: dryRun ? "dry_run_remove" : "removed",
         user_id: user.id,
-        ministry_id: ministry.id,
-        ministry_name: ministry.name,
+        removed,
+        not_found,
         debug: {
+          requester_first_name: payload.requester_first_name,
+          requester_last_name: payload.requester_last_name,
+          member_first_name: payload.member_first_name,
+          member_last_name: payload.member_last_name,
+          membership_action: payload.membership_action,
           effective_date_raw: payload.effective_date_raw,
           reason: payload.reason,
           change_types: payload.change_types,
-          membership_action: payload.membership_action,
+          ministry_context: payload.ministry_context,
+          requester_role: payload.requester_role,
+          approved_by: payload.approved_by,
           form_id: payload.form_id,
+          form_internal: payload.form_internal,
           entry_id: payload.entry_id,
+          entry_number: payload.entry_number,
+          entry_status: payload.entry_status,
           secretSource: req._cognitoSecretSource,
         },
       });

@@ -125,6 +125,12 @@ function normalizeArray(v) {
   return [];
 }
 
+/**
+ * ✅ Converts:
+ *  - ["Audio", "Security"] -> ["Audio","Security"]
+ *  - "Audio, Security" -> ["Audio","Security"]
+ *  - "Audio\nSecurity" -> ["Audio","Security"]
+ */
 function parseMinistryList(v) {
   if (!v) return [];
   if (Array.isArray(v)) {
@@ -132,7 +138,6 @@ function parseMinistryList(v) {
   }
   const s = String(v || "").trim();
   if (!s) return [];
-  // split on new lines, commas, semicolons
   return s
     .split(/\r?\n|,|;/g)
     .map((x) => String(x || "").trim())
@@ -354,7 +359,7 @@ function mapHelpsChange(bodyRaw) {
   const email = pick(e, ["email", "Email"]);
   const phone = pick(e, ["phone", "Phone"]);
 
-  // Ministries to remove: in your Render logs this is "ministries_inactive"
+  // Ministries to remove: supports multi-line or comma-separated
   const ministries_inactive_raw = pick(e, ["ministries_inactive"]);
   const ministries_to_remove = parseMinistryList(ministries_inactive_raw);
 
@@ -522,10 +527,9 @@ router.post(
         return res.status(400).json({ ok: false, message: "Missing ministry" });
       }
       if (!payload.email && !payload.phone) {
-        return res.status(400).json({
-          ok: false,
-          message: "Missing identifier (email or phone)",
-        });
+        return res
+          .status(400)
+          .json({ ok: false, message: "Missing identifier (email or phone)" });
       }
 
       const user = await findUser({
@@ -709,7 +713,7 @@ router.post(
  *  - If a ministry name doesn't exist, it is returned in not_found[]
  *
  * Dry run:
- *  - add &dryRun=1 to avoid deleting rows
+ *  - add ?dryRun=1 to avoid deleting rows
  */
 router.post(
   "/cognito/helps-member/change",

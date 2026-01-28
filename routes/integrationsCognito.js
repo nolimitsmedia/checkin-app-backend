@@ -32,6 +32,10 @@ function topKeys(obj) {
   }
 }
 
+function msSince(startMs) {
+  return Date.now() - startMs;
+}
+
 /* ------------------------- Security ------------------------- */
 function verifyWebhookSecret(req, res, next) {
   const expected = String(process.env.COGNITO_WEBHOOK_SECRET || "").trim();
@@ -97,8 +101,8 @@ function pick(obj, keys) {
 /**
  * Cognito can send:
  *  - { entry: { ... } }
- *  - or sometimes fields at top-level
- *  - or { entries: [ { ... } ] } (batch/entries format)
+ *  - or fields at top-level
+ *  - or { entries: [ { ... } ] } (batch format)
  */
 function unwrapBody(body) {
   if (!body) return {};
@@ -133,9 +137,8 @@ function normalizeArray(v) {
  */
 function parseMinistryList(v) {
   if (!v) return [];
-  if (Array.isArray(v)) {
+  if (Array.isArray(v))
     return v.map((s) => String(s || "").trim()).filter(Boolean);
-  }
   const s = String(v || "").trim();
   if (!s) return [];
   return s
@@ -144,6 +147,34 @@ function parseMinistryList(v) {
     .filter(Boolean);
 }
 
+/* ------------------------- Fast webhook processing (dedupe + background) ------------------------- */
+/**
+ * ✅ In-memory dedupe (good for “instant feel” + prevents immediate double-processing)
+ * NOTE: Render can restart or scale instances; for perfect dedupe use a DB table.
+ */
+const recentWebhookIds = new Map(); // key -> expiresAtMs
+const DEDUPE_TTL_MS = 5 * 60 * 1000;
+
+function cleanupDedupe() {
+  const now = Date.now();
+  for (const [k, exp] of recentWebhookIds.entries()) {
+    if (exp <= now) recentWebhookIds.delete(k);
+  }
+}
+
+function makeDedupeKey({ endpoint, entry_id }) {
+  return `${endpoint}::${String(entry_id || "").trim()}`;
+}
+
+function markIfNewDedupe(key) {
+  cleanupDedupe();
+  if (!key || key.endsWith("::")) return true; // if no entry_id, don't block
+  if (recentWebhookIds.has(key)) return false;
+  recentWebhookIds.set(key, Date.now() + DEDUPE_TTL_MS);
+  return true;
+}
+
+/* ------------------------- DB helpers ------------------------- */
 async function findUser({ email, phone }) {
   const emailNorm = email ? String(email).trim().toLowerCase() : null;
   const phoneDigits = digitsOnly(phone);
@@ -209,21 +240,27 @@ async function ensureMinistryByName(name) {
 }
 
 /**
- * ✅ Recommended for removal flows:
- * DO NOT create ministries. Only remove if the ministry already exists.
+ * ✅ Removal flows: do NOT create ministries
  */
-async function findMinistryByName(name) {
-  const n = String(name || "").trim();
-  if (!n) return null;
+async function findMinistriesByNames(names) {
+  const clean = (names || [])
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
 
+  if (clean.length === 0) return [];
+
+  // Case-insensitive match using LOWER(name) against LOWER(input)
   const r = await db.query(
-    `SELECT id, name, COALESCE(is_active, true) AS is_active
-     FROM ministries
-     WHERE LOWER(name) = LOWER($1)
-     LIMIT 1`,
-    [n],
+    `
+    SELECT id, name
+    FROM ministries
+    WHERE LOWER(name) = ANY (
+      SELECT LOWER(x) FROM unnest($1::text[]) AS x
+    )
+    `,
+    [clean],
   );
-  return r.rows[0] || null;
+  return r.rows || [];
 }
 
 async function addUserToMinistry(user_id, ministry_id) {
@@ -235,12 +272,26 @@ async function addUserToMinistry(user_id, ministry_id) {
   );
 }
 
-async function removeUserFromMinistry(user_id, ministry_id) {
-  await db.query(
-    `DELETE FROM user_ministries
-     WHERE user_id = $1 AND ministry_id = $2`,
-    [user_id, ministry_id],
+/**
+ * ✅ Batch removal in one query
+ */
+async function removeUserFromMinistries(user_id, ministry_ids) {
+  const ids = (ministry_ids || [])
+    .map((n) => Number(n))
+    .filter(Number.isFinite);
+  if (ids.length === 0) return 0;
+
+  const r = await db.query(
+    `
+    DELETE FROM user_ministries
+    WHERE user_id = $1
+      AND ministry_id = ANY($2::int[])
+    `,
+    [user_id, ids],
   );
+
+  // pg returns rowCount
+  return r.rowCount || 0;
 }
 
 /* ------------------------- Mapping: Volunteer Ministry Addition (legacy) ------------------------- */
@@ -332,7 +383,6 @@ function mapHelpsMember(bodyRaw) {
 function mapHelpsChange(bodyRaw) {
   const e = unwrapBody(bodyRaw);
 
-  // Member name (the person being removed)
   const memberObj =
     (e.member_name && typeof e.member_name === "object" && e.member_name) ||
     (e.MemberName && typeof e.MemberName === "object" && e.MemberName) ||
@@ -341,7 +391,6 @@ function mapHelpsChange(bodyRaw) {
   const member_first_name = memberObj ? pick(memberObj, ["First"]) : null;
   const member_last_name = memberObj ? pick(memberObj, ["Last"]) : null;
 
-  // Requester name (who submitted the change) – optional
   const requesterObj =
     (e.Name && typeof e.Name === "object" && e.Name) ||
     (e.requester_name &&
@@ -359,11 +408,9 @@ function mapHelpsChange(bodyRaw) {
   const email = pick(e, ["email", "Email"]);
   const phone = pick(e, ["phone", "Phone"]);
 
-  // Ministries to remove: supports multi-line or comma-separated
   const ministries_inactive_raw = pick(e, ["ministries_inactive"]);
   const ministries_to_remove = parseMinistryList(ministries_inactive_raw);
 
-  // Additional context fields
   const membership_action = pick(e, ["membership_action"]);
   const reason = pick(e, ["reason_for_inactivity"]);
   const effective_date =
@@ -422,16 +469,14 @@ async function handleAddOrAttach({
   ministryName,
   allowCreate,
 }) {
-  if (!ministryName) {
+  if (!ministryName)
     return { ok: false, status: 400, message: "Missing ministry" };
-  }
-  if (!email && !phone) {
+  if (!email && !phone)
     return {
       ok: false,
       status: 400,
       message: "Missing identifier (email or phone)",
     };
-  }
 
   let user = await findUser({ email, phone });
 
@@ -473,6 +518,7 @@ router.post(
   "/cognito/volunteer-ministry/add",
   verifyWebhookSecret,
   async (req, res) => {
+    const start = Date.now();
     const endpoint = `${req.method} ${req.originalUrl}`;
     try {
       console.log("[Cognito ADD legacy] HIT", {
@@ -485,7 +531,6 @@ router.post(
       });
 
       const payload = mapVolunteerAddition(req.body);
-      console.log("[Cognito ADD legacy] payload", payload);
 
       const result = await handleAddOrAttach({
         first_name: payload.first_name,
@@ -496,6 +541,10 @@ router.post(
         allowCreate: true,
       });
 
+      console.log("[Cognito ADD legacy] DONE", {
+        ms: msSince(start),
+        ok: result.ok,
+      });
       return res.status(result.status || 200).json(result);
     } catch (err) {
       console.error("Cognito add webhook error:", err);
@@ -509,6 +558,7 @@ router.post(
   "/cognito/volunteer-ministry/remove",
   verifyWebhookSecret,
   async (req, res) => {
+    const start = Date.now();
     const endpoint = `${req.method} ${req.originalUrl}`;
     try {
       console.log("[Cognito REMOVE legacy] HIT", {
@@ -521,32 +571,27 @@ router.post(
       });
 
       const payload = mapVolunteerRemoval(req.body);
-      console.log("[Cognito REMOVE legacy] payload", payload);
 
-      if (!payload.ministry) {
+      if (!payload.ministry)
         return res.status(400).json({ ok: false, message: "Missing ministry" });
-      }
-      if (!payload.email && !payload.phone) {
+      if (!payload.email && !payload.phone)
         return res
           .status(400)
           .json({ ok: false, message: "Missing identifier (email or phone)" });
-      }
 
       const user = await findUser({
         email: payload.email,
         phone: payload.phone,
       });
-      if (!user) {
+      if (!user)
         return res.json({
           ok: true,
           action: "noop",
           message: "User not found",
         });
-      }
 
-      // Removal: do NOT create ministries
-      const ministry = await findMinistryByName(payload.ministry);
-      if (!ministry) {
+      const ministries = await findMinistriesByNames([payload.ministry]);
+      if (!ministries[0]) {
         return res.json({
           ok: true,
           action: "noop",
@@ -555,14 +600,18 @@ router.post(
         });
       }
 
-      await removeUserFromMinistry(user.id, ministry.id);
+      await removeUserFromMinistries(user.id, [ministries[0].id]);
 
+      console.log("[Cognito REMOVE legacy] DONE", {
+        ms: msSince(start),
+        user_id: user.id,
+      });
       return res.json({
         ok: true,
         action: "removed",
         user_id: user.id,
-        ministry_id: ministry.id,
-        ministry_name: ministry.name,
+        ministry_id: ministries[0].id,
+        ministry_name: ministries[0].name,
       });
     } catch (err) {
       console.error("Cognito remove webhook error:", err);
@@ -578,6 +627,7 @@ router.post(
   "/cognito/helps-member/submit",
   verifyWebhookSecret,
   async (req, res) => {
+    const start = Date.now();
     const endpoint = `${req.method} ${req.originalUrl}`;
     try {
       console.log("[Cognito HELPS SUBMIT] HIT", {
@@ -590,8 +640,6 @@ router.post(
       });
 
       const payload = mapHelpsMember(req.body);
-      console.log("[Cognito HELPS SUBMIT] mapped payload", payload);
-
       const allowCreate = payload.is_new === true;
 
       const result = await handleAddOrAttach({
@@ -601,6 +649,11 @@ router.post(
         phone: payload.phone,
         ministryName: payload.ministry,
         allowCreate,
+      });
+
+      console.log("[Cognito HELPS SUBMIT] DONE", {
+        ms: msSince(start),
+        ok: result.ok,
       });
 
       return res.status(result.status || 200).json({
@@ -625,6 +678,7 @@ router.post(
   "/cognito/helps-member/update",
   verifyWebhookSecret,
   async (req, res) => {
+    const start = Date.now();
     const endpoint = `${req.method} ${req.originalUrl}`;
     try {
       console.log("[Cognito HELPS UPDATE] HIT", {
@@ -637,8 +691,6 @@ router.post(
       });
 
       const payload = mapHelpsMember(req.body);
-      console.log("[Cognito HELPS UPDATE] mapped payload", payload);
-
       const allowCreate = payload.is_new === true;
 
       const result = await handleAddOrAttach({
@@ -648,6 +700,11 @@ router.post(
         phone: payload.phone,
         ministryName: payload.ministry,
         allowCreate,
+      });
+
+      console.log("[Cognito HELPS UPDATE] DONE", {
+        ms: msSince(start),
+        ok: result.ok,
       });
 
       return res.status(result.status || 200).json({
@@ -684,7 +741,6 @@ router.post(
       });
 
       const payload = mapHelpsMember(req.body);
-      console.log("[Cognito HELPS DELETE] mapped payload", payload);
 
       return res.json({
         ok: true,
@@ -708,121 +764,133 @@ router.post(
 /**
  * POST /api/integrations/cognito/helps-member/change
  *
- * Removal safety:
- *  - DOES NOT create ministries
- *  - If a ministry name doesn't exist, it is returned in not_found[]
- *
- * Dry run:
- *  - add ?dryRun=1 to avoid deleting rows
+ * Improvements added:
+ *  ✅ Immediate ACK (respond fast) + background processing
+ *  ✅ Dedupe using entry_id (prevents retries/double-processing)
+ *  ✅ Batch ministry lookup + batch delete (1-2 queries instead of N)
+ *  ✅ Optional dryRun=1
  */
 router.post(
   "/cognito/helps-member/change",
   verifyWebhookSecret,
   async (req, res) => {
+    const start = Date.now();
     const endpoint = `${req.method} ${req.originalUrl}`;
-    try {
-      console.log("[Cognito HELPS CHANGE] HIT", {
+
+    // Map early (fast CPU) so we can build ack + dedupe key
+    const payload = mapHelpsChange(req.body);
+
+    // Dedupe key (entry_id is best)
+    const dedupeKey = makeDedupeKey({
+      endpoint: "/cognito/helps-member/change",
+      entry_id: payload.entry_id,
+    });
+    const isNew = markIfNewDedupe(dedupeKey);
+
+    // Always ACK quickly to avoid Cognito retries
+    res.json({
+      ok: true,
+      queued: true,
+      deduped: !isNew,
+      entry_id: payload.entry_id,
+    });
+
+    // If duplicate, don't process again
+    if (!isNew) {
+      console.log("[Cognito HELPS CHANGE] DEDUPED", {
         at: nowIso(),
         endpoint,
-        ip: ipChain(req),
-        secretSource: req._cognitoSecretSource,
-        body_top_keys: topKeys(req.body),
-        unwrapped_keys: topKeys(unwrapBody(req.body)),
+        entry_id: payload.entry_id,
+        ms: msSince(start),
       });
+      return;
+    }
 
-      const payload = mapHelpsChange(req.body);
-      console.log("[Cognito HELPS CHANGE] mapped payload", payload);
-
-      if (!payload.email && !payload.phone) {
-        return res.status(400).json({
-          ok: false,
-          message: "Missing identifier (email or phone)",
-          debug: { form_id: payload.form_id, entry_id: payload.entry_id },
+    // Do real work after response
+    setImmediate(async () => {
+      try {
+        console.log("[Cognito HELPS CHANGE] START (bg)", {
+          at: nowIso(),
+          endpoint,
+          ip: ipChain(req),
+          secretSource: req._cognitoSecretSource,
+          entry_id: payload.entry_id,
+          ministries_to_remove: payload.ministries_to_remove,
         });
-      }
 
-      if (
-        !payload.ministries_to_remove ||
-        payload.ministries_to_remove.length === 0
-      ) {
-        return res.status(400).json({
-          ok: false,
-          message:
-            "Missing ministries_inactive (no ministries provided to remove)",
-          debug: { form_id: payload.form_id, entry_id: payload.entry_id },
-        });
-      }
-
-      const user = await findUser({
-        email: payload.email,
-        phone: payload.phone,
-      });
-      if (!user) {
-        return res.json({
-          ok: true,
-          action: "noop",
-          message: "User not found",
-          debug: {
-            form_id: payload.form_id,
-            form_internal: payload.form_internal,
+        if (!payload.email && !payload.phone) {
+          console.log("[Cognito HELPS CHANGE] FAIL missing identifier", {
             entry_id: payload.entry_id,
-            secretSource: req._cognitoSecretSource,
+          });
+          return;
+        }
+
+        if (
+          !payload.ministries_to_remove ||
+          payload.ministries_to_remove.length === 0
+        ) {
+          console.log("[Cognito HELPS CHANGE] FAIL no ministries provided", {
+            entry_id: payload.entry_id,
+          });
+          return;
+        }
+
+        const user = await findUser({
+          email: payload.email,
+          phone: payload.phone,
+        });
+        if (!user) {
+          console.log("[Cognito HELPS CHANGE] NOOP user not found", {
+            entry_id: payload.entry_id,
+            email: payload.email,
+            phone: payload.phone ? maskSecret(payload.phone) : null,
+          });
+          return;
+        }
+
+        const dryRun = String(req.query.dryRun || "").trim() === "1";
+
+        // Batch lookup ministries (do not create)
+        const found = await findMinistriesByNames(payload.ministries_to_remove);
+        const foundLower = new Set(
+          found.map((m) => String(m.name).toLowerCase()),
+        );
+        const not_found = payload.ministries_to_remove
+          .filter((n) => !foundLower.has(String(n).toLowerCase()))
+          .map((n) => ({ ministry_name: n }));
+
+        const foundIds = found.map((m) => m.id);
+
+        let removedCount = 0;
+        if (!dryRun) {
+          removedCount = await removeUserFromMinistries(user.id, foundIds);
+        }
+
+        console.log("[Cognito HELPS CHANGE] DONE (bg)", {
+          entry_id: payload.entry_id,
+          user_id: user.id,
+          dryRun,
+          found: found.map((m) => ({ id: m.id, name: m.name })),
+          not_found,
+          removedCount,
+          ms: msSince(start),
+          meta: {
+            membership_action: payload.membership_action,
+            effective_date_raw: payload.effective_date_raw,
+            reason: payload.reason,
+            change_types: payload.change_types,
+            ministry_context: payload.ministry_context,
+            requester_role: payload.requester_role,
+            approved_by: payload.approved_by,
           },
         });
-      }
-
-      const dryRun = String(req.query.dryRun || "").trim() === "1";
-      const removed = [];
-      const not_found = [];
-
-      for (const name of payload.ministries_to_remove) {
-        const ministry = await findMinistryByName(name);
-        if (!ministry) {
-          not_found.push({ ministry_name: name });
-          continue;
-        }
-
-        if (!dryRun) {
-          await removeUserFromMinistry(user.id, ministry.id);
-        }
-
-        removed.push({
-          ministry_id: ministry.id,
-          ministry_name: ministry.name,
-          dryRun,
+      } catch (err) {
+        console.error("[Cognito HELPS CHANGE] ERROR (bg)", {
+          entry_id: payload.entry_id,
+          err: err && err.message ? err.message : err,
         });
       }
-
-      return res.json({
-        ok: true,
-        action: dryRun ? "dry_run_remove" : "removed",
-        user_id: user.id,
-        removed,
-        not_found,
-        debug: {
-          requester_first_name: payload.requester_first_name,
-          requester_last_name: payload.requester_last_name,
-          member_first_name: payload.member_first_name,
-          member_last_name: payload.member_last_name,
-          membership_action: payload.membership_action,
-          effective_date_raw: payload.effective_date_raw,
-          reason: payload.reason,
-          change_types: payload.change_types,
-          ministry_context: payload.ministry_context,
-          requester_role: payload.requester_role,
-          approved_by: payload.approved_by,
-          form_id: payload.form_id,
-          form_internal: payload.form_internal,
-          entry_id: payload.entry_id,
-          entry_number: payload.entry_number,
-          entry_status: payload.entry_status,
-          secretSource: req._cognitoSecretSource,
-        },
-      });
-    } catch (err) {
-      console.error("Cognito HELPS change error:", err);
-      return res.status(500).json({ ok: false, message: "Webhook failed" });
-    }
+    });
   },
 );
 
